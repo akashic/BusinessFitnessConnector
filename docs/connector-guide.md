@@ -15,8 +15,8 @@
    - open https://development.businessfitness.com/, click **Run in Postman**, fork it, and use **... > Export > Collection v2.1** → `active-api.postman_collection.json`.
 
    Save it in the **repo root**, next to `connector-overrides.yaml`. The generator applies that file automatically only when it's beside the collection; if the collection is elsewhere, pass `--overrides connector-overrides.yaml`, or your hand edits won't be applied.
-2. Get an environment file that defines `auth_url`, `access_token_url` and `scopes`. Fork the "Active API Environment Template" in Postman, fill it in, and export it (Environments > ... > Export) → `active.postman_environment.json`.
-3. Generate the connector files:
+2. Get an environment file that defines `auth_url`, `access_token_url` and `scopes`. Fork the "Active API Environment Template" in Postman, fill it in, and export it (Environments > ... > Export) → `active.postman_environment.json`. Or write it yourself from the sample in [Where each value in the build command comes from](#where-each-value-in-the-build-command-comes-from).
+3. Generate the connector files. Every value is explained in [Where each value in the build command comes from](#where-each-value-in-the-build-command-comes-from).
 
        pip install -r requirements.txt
        python3 postman2pp.py active-api.postman_collection.json \
@@ -89,6 +89,58 @@
    `pac connector create` has no option for the OAuth client secret, so enter it on the connector's Security tab after creation. (The older `paconn create` CLI accepts `--secret`.)
 
 6. Test a list endpoint with a repeated filter (e.g. deliverables with two `ExternalId` values). Repeated query keys are generated as arrays with `collectionFormat: multi`. Power Platform's validator accepts that for a private custom connector (see step 4), but whether the runtime actually sends repeated keys is still untested.
+
+## Where each value in the build command comes from
+
+Step 3's command takes its values from three places: this repo, Business Fitness, and you.
+
+### The commands
+
+- **`pip install -r requirements.txt`** installs the two libraries the generator uses, listed in the repo's `requirements.txt`:
+  - PyYAML writes the YAML output;
+  - openapi-spec-validator checks the result is valid Swagger 2.0.
+- **`python3 postman2pp.py`** runs the generator script in the repo root.
+
+### The values
+
+| Value | Where it comes from |
+|---|---|
+| `active-api.postman_collection.json` | **Business Fitness.** Their API collection, saved to a file whose name you choose. Download it from `https://development.businessfitness.com/api/collections/31711831/2s9Yynm4V5?segregateAuth=true&versionTag=latest`, or export it from Postman ("Export > Collection v2.1"). The generator accepts either format. Save it in the repo root so `connector-overrides.yaml` is applied (see the defaults below). |
+| `--title "Business Fitness Active"` | **You.** The connector's display name in Power Platform. Microsoft limits it to 30 characters, and the generator warns if it's longer. |
+| `--description "Work with clients, jobs, …"` | **You.** Free text shown as the connector's description. The suggested wording lists Business Fitness's five API areas (Core for clients, Workflow for jobs, Workpapers, Ledger and Reporting, and Documents), taken from the collection's own description. Without this option you get "Business Fitness Active custom connector". |
+| `active.postman_environment.json` | **You, with values from Business Fitness.** A Postman environment file that fills in the sign-in settings the collection leaves as placeholders. See below. |
+| `--publisher "<your organisation>"` | **You.** Your organisation's name, written into `apiProperties.json`. Without it the connector ships with the placeholder `YOUR_ORG`. |
+| `<your connector website>` | **You.** Your organisation's web page about the connector (it's your connector, not Business Fitness's). It must be a full URL such as `https://…`, or the run stops (Microsoft's "UrlNotValid" rule). |
+| `<your privacy policy URL>` | **You.** Your organisation's privacy policy. Same rules as the website. |
+
+### The environment file
+
+The collection's sign-in settings use three placeholders: `{{auth_url}}`, `{{access_token_url}}` and `{{scopes}}`. The generator stops with an error if any is left undefined. The collection also has a `{{client_id}}` placeholder, which the generator ignores: it always writes `YOUR_CLIENT_ID` into `apiProperties.json`, and you replace that by hand with the client ID Business Fitness issues. Business Fitness's environment template isn't public, so either fork their "Active API Environment Template" in Postman and export it, or write the file yourself:
+
+```json
+{
+  "values": [
+    {"key": "auth_url",         "value": "https://identity.businessfitness.com.au/connect/authorize", "enabled": true},
+    {"key": "access_token_url", "value": "https://identity.businessfitness.com.au/connect/token",     "enabled": true},
+    {"key": "scopes",           "value": "core.read workflow.read",                                    "enabled": true}
+  ]
+}
+```
+
+- **The two URLs** come from Business Fitness's "Authentication" documentation, which is part of the collection. They must use `https`.
+- **`scopes`** are the ones your integration is approved for. They come from Business Fitness's scope list: `core`, `workflow`, `workpapers`, `ledger` and `documents`, each in `.read` or `.write`. Request the fewest you need. You don't need to add `x-api` or `offline_access`; the generator adds those automatically through `--extra-scopes`.
+- `*.postman_environment.json` files are git-ignored, so this file won't be committed.
+
+### Values left at their defaults
+
+| Option | Default | Where the default comes from |
+|---|---|---|
+| `--host` | `api.businessfitness.com` | Read from the collection's request URLs. |
+| `--out` | `./connector` | The generator's default; the folder is git-ignored and only written if the run succeeds. |
+| `--overrides` | `connector-overrides.yaml` **next to the collection file** | So keep the collection in the repo root, or pass `--overrides connector-overrides.yaml`, or your hand edits won't be applied. The run prints `NOTE: applied overrides for … operations from …` when the file was used. |
+| `--extra-scopes` | `x-api offline_access` | From Business Fitness's docs: `x-api` is required on every request, and `offline_access` gives refresh tokens. |
+| `--publisher` | `YOUR_ORG` | A placeholder; always pass your organisation's name (it's in the example above). |
+| `--brand-color` | `#007EE5` | A neutral blue chosen for the connector icon background. Any `#RRGGBB` value works; others are warned about. |
 
 ## Using the connector in flows
 
