@@ -1,8 +1,15 @@
 name: tests
 
 on:
+  # skipped when every changed file is documentation; any other change still runs the tests
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
 
 permissions:
   contents: read
