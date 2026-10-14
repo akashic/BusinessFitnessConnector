@@ -1,2 +1,7 @@
 .DS_Store
 __pycache__/
+
+# Postman environments can hold client IDs, test record IDs or tokens
+*.postman_environment.json
+# generated connector files; regenerate with postman2pp.py
+connector/

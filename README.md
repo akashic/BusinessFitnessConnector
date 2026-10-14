@@ -24,11 +24,11 @@ Postman environment ─────────────────┘      
 
 It also turns the collection into something Power Platform will accept:
 
-- Field labels are made readable: `clientID` becomes "Client ID".
-- Typed placeholders such as `<uuid>` and `<boolean>` become real types.
-- Every error response shares the API's error format.
-- Requests that can't be connector actions are skipped with a warning, such as the direct blob upload or a duplicated route.
-- It stops with an error if the result is invalid, too large for Power Platform (1 MB or more), or missing auth settings.
+- Field labels are made readable: `clientID` becomes "Client ID". Action names follow Microsoft's string guidance, with no trailing punctuation.
+- Typed placeholders such as `<uuid>` and `<boolean>` become real types, and parameters documented as "(Required)" are required.
+- Each action has a single response schema, which is what Power Platform's designer and validator expect.
+- Requests that can't be connector actions are skipped with a warning, such as the direct blob upload, a duplicated route or a request on another host. Actions with no example response are flagged too.
+- It stops with an error if auth settings are missing or not `https`, if the API host is unknown, or if the result is invalid or too large for Power Platform (1 MB or more). A failed run never overwrites the output folder.
 
 ## Repository layout
 
@@ -59,14 +59,15 @@ curl -o active-api.json \
 # 3. Generate the connector
 python3 postman2pp.py active-api.json --title "Business Fitness Active" \
     --env active.postman_environment.json \
-    --website <your website> --privacy-url <your privacy policy URL> --out ./connector
+    --description "<what the connector is for>" \
+    --website <your website> --privacy-url <your privacy policy URL>   # writes ./connector
 
 # 4. Review, then deploy (see the guide for the review checklist)
 pac connector create --api-definition-file connector/apiDefinition.swagger.json \
     --api-properties-file connector/apiProperties.json --environment <env-id>
 ```
 
-Run the tests with `python3 -m unittest discover -s tests`.
+Run the tests with `python3 -m unittest` from the repo root.
 
 ## Things to know before using it
 

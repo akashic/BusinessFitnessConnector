@@ -10,18 +10,38 @@ Documenter site (e.g. https://development.businessfitness.com/api/collections/<o
 
 Usage:
   python3 postman2pp.py collection.json --title "Business Fitness Active" \
-      --env environment.json [--host api.example.com] [--out ./out]
+      --env environment.json [--host api.example.com] [--out ./connector]
 
-Exit code is non-zero if the auth config has undefined variables or the output
-fails validation. Review the generated YAML before deploying - inferred schemas
-are only as good as the examples in the collection.
+Exit code is non-zero if the auth config is incomplete or insecure, no API host
+is known, or the output fails validation or is too large; --out is then left
+unchanged and the failed output goes to a temporary folder. Errors go to stderr.
+Review the generated YAML before deploying - inferred schemas are only as good as
+the examples in the collection - and run `paconn validate` for Power Platform's
+own rules.
 """
-import argparse, html, json, os, re, sys
+import argparse, html, json, os, re, sys, tempfile
 from collections import Counter, OrderedDict
+from urllib.parse import parse_qsl
 
 import yaml
 
 MAX_DEFINITION_BYTES = 1024 * 1024   # Power Platform rejects definitions of 1 MB or more
+MAX_SUMMARY_CHARS = 80               # Microsoft's connector string guidance
+MAX_TITLE_CHARS = 30                 # Microsoft's connector string guidance
+OUTPUT_FILES = ('apiDefinition.swagger.yaml', 'apiDefinition.swagger.json', 'apiProperties.json')
+
+# Business Fitness Active API limits from its collection docs ("Searching", "Pagination")
+SEARCH_MAX_LENGTH = 64           # "The search field is typically restricted to 64 characters"
+DETAILED_PAGE_SIZE_MAX = 100     # max PageSize on /detailed endpoints
+
+HTML_TAGS = ('a|b|blockquote|br|code|div|em|h[1-6]|hr|i|img|li|ol|p|pre|span|strong|sub|sup|'
+             'table|tbody|td|th|thead|tr|u|ul')
+HTML_TAG_RE = re.compile(rf'</?(?:{HTML_TAGS})\b[^<>]*>', re.IGNORECASE)
+REQUIRED_PREFIX_RE = re.compile(r'^\(Required\)\s*', re.IGNORECASE)
+
+
+class ConfigError(Exception):
+    """Input that would produce a connector which can't work; main() reports it and exits 1."""
 
 # Postman Documenter writes example values as typed placeholders, e.g. "<uuid>" or "<boolean>"
 PLACEHOLDER_TYPES = {
@@ -37,15 +57,6 @@ PLACEHOLDER_TYPES = {
 }
 DATE_RE = re.compile(r'\d{4}-\d{2}-\d{2}')
 DATETIME_RE = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?')
-
-# RFC 7807-style error body returned by the Business Fitness Active API
-ERROR_SCHEMA = {'type': 'object', 'properties': OrderedDict([
-    ('type', {'type': 'string', 'x-ms-summary': 'Type', 'description': 'URL describing the HTTP status code.'}),
-    ('title', {'type': 'string', 'x-ms-summary': 'Title'}),
-    ('detail', {'type': 'string', 'x-ms-summary': 'Detail', 'description': 'Error message.'}),
-    ('status', {'type': 'integer', 'x-ms-summary': 'Status'}),
-    ('traceId', {'type': 'string', 'x-ms-summary': 'Trace ID', 'description': 'Quote this when contacting support.'}),
-])}
 
 ACRONYMS = {'abn', 'acn', 'api', 'bas', 'csv', 'gst', 'id', 'pdf', 'tfn', 'uri', 'url', 'utc'}
 MINOR_WORDS = {'a', 'an', 'and', 'as', 'at', 'by', 'for', 'in', 'of', 'on', 'or', 'the', 'to'}
@@ -75,9 +86,21 @@ def text(desc, limit=1000):
     """Plain text from a Postman description (string or {content: ...}, HTML or markdown)."""
     if isinstance(desc, dict): desc = desc.get('content')
     if not isinstance(desc, str): return ''
-    s = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', desc))).strip()
+    s = html.unescape(HTML_TAG_RE.sub(' ', desc))   # only real tags, so "a < b > c" survives
+    s = re.sub(r'\[([^\]]+)\]\(([^)\s]+)\)', r'\1 (\2)', s)   # markdown link -> "text (url)"
+    s = re.sub(r'(\*\*|__|`)', '', s)
+    s = re.sub(r'^\s*#+\s*', '', s, flags=re.MULTILINE)
+    s = re.sub(r'\s+', ' ', s).strip()
     if len(s) > limit: s = s[:limit - 1].rsplit(' ', 1)[0] + '…'
     return s
+
+
+def summary_text(name):
+    """Operation summary per Microsoft's guidance: no '/', at most 80 chars, ends alphanumeric."""
+    s = re.sub(r'\s*/\s*', ' or ', name.strip())
+    s = re.sub(r'\s*\(([^()]*)\)\s*$', r' - \1', s)   # "List documents (minimal)" -> "List documents - minimal"
+    if len(s) > MAX_SUMMARY_CHARS: s = s[:MAX_SUMMARY_CHARS].rsplit(' ', 1)[0]
+    return re.sub(r'[^A-Za-z0-9]+$', '', s) or name
 
 
 def placeholder_schema(v):
@@ -91,7 +114,8 @@ def infer_schema(v, depth=0):
     if isinstance(v, int): return {'type': 'integer'}
     if isinstance(v, float): return {'type': 'number'}
     if isinstance(v, str):
-        if placeholder_schema(v): return placeholder_schema(v)
+        typed = placeholder_schema(v)
+        if typed: return typed
         if DATE_RE.fullmatch(v): return {'type': 'string', 'format': 'date'}
         if DATETIME_RE.fullmatch(v): return {'type': 'string', 'format': 'date-time'}
         return {'type': 'string'}
@@ -134,9 +158,12 @@ def parse_json_loose(raw):
     except ValueError: return None
 
 
-def resolve(s, env):
+def resolve(s, env, leading_only=False):
+    """Substitute {{vars}} from env. leading_only resolves just a URL's {{base_url}}-style prefix,
+    so test values in the environment never get baked into path segments."""
     if not isinstance(s, str): return s
-    return re.sub(r'\{\{([^}]+)\}\}', lambda m: env.get(m.group(1).strip(), m.group(0)), s)
+    pattern = r'^\{\{([^}]+)\}\}' if leading_only else r'\{\{([^}]+)\}\}'
+    return re.sub(pattern, lambda m: env.get(m.group(1).strip(), m.group(0)), s)
 
 
 def load_json(path):
@@ -202,20 +229,31 @@ def build_security(col, env, extra_scopes):
 
     unresolved = sorted(set(re.findall(r'\{\{([^}]+)\}\}', json.dumps(secdefs))))
     if unresolved:
-        sys.exit(f'ERROR: auth settings use undefined variables: {", ".join(unresolved)}. '
-                 'Define them in the collection or pass --env with an environment that does.')
+        raise ConfigError(f'auth settings use undefined variables: {", ".join(unresolved)}. '
+                          'Define them in the collection or pass --env with an environment that does.')
+    if atype == 'oauth2':
+        insecure = [u for u in (auth_url, token_url) if not u.lower().startswith('https://')]
+        if insecure:
+            raise ConfigError(f'OAuth URLs must use https: {", ".join(insecure)}')
     return secdefs, security, conn_params
 
 
 def request_url(req):
-    """(raw URL, structured URL) - Documenter JSON keeps the structured form in urlObject."""
+    """(raw URL, structured URL) - Documenter JSON keeps the structured form in urlObject.
+    A plain-string URL with no structured form gets its query parsed from the raw string."""
     url = req.get('url')
     raw = url if isinstance(url, str) else (url or {}).get('raw', '')
     obj = url if isinstance(url, dict) else req.get('urlObject') or {}
+    if 'query' not in obj and '?' in raw:
+        query = raw.split('?', 1)[1].split('#')[0]
+        obj = {**obj, 'query': [{'key': k, 'value': v} for k, v in parse_qsl(query, keep_blank_values=True)]}
     return raw, obj
 
 
 def typed_param(name, location, example, description, required=False, array=False):
+    """Parameter typed from a "<type>" placeholder. A "(Required)" description prefix marks it required."""
+    if REQUIRED_PREFIX_RE.match(description):
+        required, description = True, REQUIRED_PREFIX_RE.sub('', description)
     p = OrderedDict(name=name, **{'in': location}, required=required)
     schema = placeholder_schema(example) or {'type': 'string'}
     if array: p.update(type='array', items=schema, collectionFormat='multi')
@@ -225,16 +263,16 @@ def typed_param(name, location, example, description, required=False, array=Fals
     return p
 
 
-def build_operation(it, req, method, path, url, folder, opid):
+def build_operation(it, req, method, path, url, folder, opid, warnings):
     name = it['name'].strip()
-    op = OrderedDict(operationId=opid, summary=name)
+    op = OrderedDict(operationId=opid, summary=summary_text(name))
     desc = text(req.get('description') or it.get('description'))
-    if desc and desc != name: op['description'] = desc
+    if desc and desc.rstrip('.') != op['summary']: op['description'] = desc
     op['tags'] = [folder or 'General']
     op['parameters'] = []
 
     path_vars = {v.get('key'): v for v in url.get('variable') or []}
-    for pv in re.findall(r'\{([A-Za-z_][A-Za-z0-9_]*)\}', path):
+    for pv in re.findall(r'\{([A-Za-z_][A-Za-z0-9_.\-]*)\}', path):
         var = path_vars.get(pv, {})
         p = typed_param(pv, 'path', var.get('value'), text(var.get('description'), 300), required=True)
         p['x-ms-url-encoding'] = 'single'
@@ -246,6 +284,11 @@ def build_operation(it, req, method, path, url, folder, opid):
         if any(p['name'] == q['key'] and p['in'] == 'query' for p in op['parameters']): continue
         op['parameters'].append(typed_param(q['key'], 'query', q.get('value'), text(q.get('description'), 300),
                                             array=repeats[q['key']] > 1))
+    for p in op['parameters']:
+        if p['in'] != 'query' or p['type'] == 'array': continue
+        if p['name'].lower() == 'search' and p['type'] == 'string': p['maxLength'] = SEARCH_MAX_LENGTH
+        if p['name'].lower() == 'pagesize' and p['type'] == 'integer' and path.endswith('/detailed'):
+            p['minimum'], p['maximum'] = 1, DETAILED_PAGE_SIZE_MAX
 
     for h in req.get('header') or []:
         k = h.get('key', '').lower()
@@ -254,7 +297,11 @@ def build_operation(it, req, method, path, url, folder, opid):
                                  'x-ms-summary': label(h['key']), 'x-ms-visibility': 'advanced'})
 
     body = req.get('body') or {}
-    if body.get('mode') == 'raw' and method in ('post', 'put', 'patch'):
+    if body.get('mode') == 'raw' and (body.get('raw') or '').strip() and method not in ('post', 'put', 'patch'):
+        # Power Platform forbids bodies on fetch operations (BodyOrFormDataParameterInFetchOperationNotAllowed)
+        warnings.append(f'"{name}": dropped the request body of a {method.upper()} request; '
+                        'Power Platform connectors can only send bodies with POST, PUT and PATCH')
+    elif body.get('mode') == 'raw' and method in ('post', 'put', 'patch'):
         parsed = parse_json_loose(body.get('raw'))
         op['parameters'].append({'name': 'body', 'in': 'body', 'required': True,
                                  'schema': infer_schema(parsed) if parsed is not None else {'type': 'object'}})
@@ -265,27 +312,33 @@ def build_operation(it, req, method, path, url, folder, opid):
                                      'type': 'file' if f.get('type') == 'file' else 'string',
                                      'x-ms-summary': label(f['key'])})
 
-    # success bodies get inferred schemas; every error shares the API's error definition
+    # Only the first success response carries a schema: the designer uses just one, and Power Platform's
+    # validator flags schemas on 'default' (DefaultResponseHasSchema) or on several responses
+    # (OperationHasManyResponsesWithSchema). Error responses are listed for documentation only.
     responses = OrderedDict()
     for r in it.get('response') or []:
         code = str(r.get('code') or 200)
         if code in responses: continue
-        if code.startswith('2'):
-            parsed = parse_json_loose(r.get('body'))
-            responses[code] = {'description': r.get('status') or 'OK',
-                               'schema': infer_schema(parsed) if parsed is not None else {'type': 'object'}}
-        else:
-            responses[code] = {'description': r.get('status') or 'Error', 'schema': {'$ref': '#/definitions/Error'}}
+        responses[code] = {'description': r.get('status') or ('OK' if code.startswith('2') else 'Error')}
+        if code.startswith('2') and not any('schema' in x for x in responses.values()):
+            example = (r.get('body') or '').strip()
+            if example:
+                parsed = parse_json_loose(example)
+                responses[code]['schema'] = infer_schema(parsed) if parsed is not None else {'type': 'object'}
     if not any(c.startswith('2') for c in responses):
         responses['200'] = {'description': 'OK', 'schema': {'type': 'object'}}
-    responses['default'] = {'description': 'Error', 'schema': {'$ref': '#/definitions/Error'}}
+    if method != 'delete' and all(r.get('schema') in (None, {'type': 'object'}) for r in responses.values()):
+        warnings.append(f'"{name}" has no usable example success response, so its output is untyped; '
+                        'add a response schema by hand')
+    responses['default'] = {'description': 'Error'}
     op['responses'] = responses
     return op
 
 
 def build_paths(col, env):
     paths, tags, seen_ids, warnings = OrderedDict(), [], set(), []
-    host_guess = None
+    path_case = {}       # lower-cased path -> path as first seen; Power Platform rejects case-only differences
+    host_guess = None    # the collection's own API host: the first absolute URL's host
 
     def walk(items, folder):
         nonlocal host_guess
@@ -299,10 +352,14 @@ def build_paths(col, env):
             if not req: continue
             name = it['name'].strip()
             raw, url = request_url(req)
-            raw = resolve(raw, env)
+            raw = resolve(raw, env, leading_only=True)
             m = re.match(r'https?://([^/]+)(/[^?#]*)?', raw)
             if m:
                 host_guess = host_guess or m.group(1)
+                if m.group(1).lower() != host_guess.lower():
+                    # a connector has one host; this request would otherwise be sent to the wrong server
+                    warnings.append(f'skipped "{name}": its host {m.group(1)} differs from the API host {host_guess}')
+                    continue
                 path = m.group(2) or '/'
             else:
                 path = re.sub(r'^\{\{[^}]+\}\}', '', raw).split('?')[0]
@@ -312,9 +369,13 @@ def build_paths(col, env):
                     continue
                 path = path or '/'
                 if not path.startswith('/'): path = '/' + path
-            path = re.sub(r':([A-Za-z_][A-Za-z0-9_]*)', r'{\1}', path)
+            path = re.sub(r'(?<=/):([A-Za-z_][A-Za-z0-9_.\-]*)', r'{\1}', path)
             path = re.sub(r'\{\{([^}]+)\}\}', r'{\1}', path)
             method = (req.get('method') or 'GET').lower()
+            if path_case.setdefault(path.lower(), path) != path:
+                warnings.append(f'skipped "{name}": {path} differs only in case from {path_case[path.lower()]}, '
+                                'which Power Platform rejects (PathRedefined)')
+                continue
             existing = paths.get(path, {}).get(method)
             if existing:
                 warnings.append(f'skipped "{name}": {method.upper()} {path} is already defined by '
@@ -326,7 +387,8 @@ def build_paths(col, env):
                 opid = f'{base}{n}'
                 n += 1
             seen_ids.add(opid)
-            paths.setdefault(path, OrderedDict())[method] = build_operation(it, req, method, path, url, folder, opid)
+            paths.setdefault(path, OrderedDict())[method] = build_operation(it, req, method, path, url, folder,
+                                                                            opid, warnings)
 
     walk(col.get('item', []), None)
     used = {o['tags'][0] for ops in paths.values() for o in ops.values()}
@@ -334,18 +396,16 @@ def build_paths(col, env):
     return paths, tags, host_guess, warnings
 
 
-def build_spec(a, col, paths, tags, host, secdefs, security):
-    info = col.get('info', {})
+def build_spec(a, paths, tags, host, secdefs, security):
     return OrderedDict([
         ('swagger', '2.0'),
         ('info', {'title': a.title, 'version': '1.0.0',
-                  'description': text(info.get('description')) or f'{a.title} custom connector'}),
+                  'description': a.description or f'{a.title} custom connector'}),
         ('host', host), ('basePath', a.base_path), ('schemes', ['https']),
         ('consumes', ['application/json']), ('produces', ['application/json']),
         ('securityDefinitions', secdefs), ('security', security),
         ('tags', [{'name': t} for t in tags]),
         ('paths', paths),
-        ('definitions', {'Error': ERROR_SCHEMA}),
         ('x-ms-connector-metadata', [{'propertyName': 'Website', 'propertyValue': a.website},
                                      {'propertyName': 'Privacy policy', 'propertyValue': a.privacy_url},
                                      {'propertyName': 'Categories', 'propertyValue': 'Finance'}])])
@@ -364,14 +424,28 @@ def validate(spec):
     return True, 'valid Swagger 2.0'
 
 
+def write_outputs(out, spec, definition, props):
+    class Dumper(yaml.SafeDumper): pass
+    Dumper.add_representer(OrderedDict, lambda d, data: d.represent_dict(data.items()))
+    os.makedirs(out, exist_ok=True)
+    yaml_file, json_file, props_file = (os.path.join(out, f) for f in OUTPUT_FILES)
+    with open(yaml_file, 'w', encoding='utf-8') as f:
+        yaml.dump(spec, f, Dumper=Dumper, sort_keys=False, width=120, allow_unicode=True)
+    with open(json_file, 'w', encoding='utf-8') as f:
+        f.write(definition)
+    with open(props_file, 'w', encoding='utf-8') as f:
+        json.dump(props, f, indent=2)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Convert a Postman collection into a Power Platform custom connector.')
     ap.add_argument('collection')
     ap.add_argument('--title', required=True)
+    ap.add_argument('--description', help='connector description shown in Power Platform')
     ap.add_argument('--host')
     ap.add_argument('--base-path', default='/')
     ap.add_argument('--env')
-    ap.add_argument('--out', default='.')
+    ap.add_argument('--out', default='connector', help='output folder, written only if generation succeeds')
     ap.add_argument('--publisher', default='YOUR_ORG')
     ap.add_argument('--extra-scopes', default='x-api offline_access',
                     help='OAuth scopes always requested (Active API needs x-api; offline_access gives refresh tokens)')
@@ -385,38 +459,44 @@ def main(argv=None):
     if a.env:
         env.update({v['key']: v.get('value', '') for v in load_json(a.env).get('values', []) if v.get('enabled', True)})
 
-    secdefs, security, conn_params = build_security(col, env, a.extra_scopes.split())
-    paths, tags, host_guess, warnings = build_paths(col, env)
-    host = a.host or host_guess or 'CHANGE_ME.example.com'
-    spec = build_spec(a, col, paths, tags, host, secdefs, security)
+    try:
+        secdefs, security, conn_params = build_security(col, env, a.extra_scopes.split())
+        paths, tags, host_guess, warnings = build_paths(col, env)
+        host = a.host or host_guess
+        if not host:
+            raise ConfigError('no request has an absolute URL, so the API host is unknown; pass --host')
+    except ConfigError as e:
+        print(f'ERROR: {e}', file=sys.stderr)
+        return 1
+    spec = build_spec(a, paths, tags, host, secdefs, security)
     props = {'properties': {'connectionParameters': conn_params, 'iconBrandColor': a.brand_color,
                             'capabilities': [], 'publisher': a.publisher}}
 
-    class Dumper(yaml.SafeDumper): pass
-    Dumper.add_representer(OrderedDict, lambda d, data: d.represent_dict(data.items()))
-    os.makedirs(a.out, exist_ok=True)
-    with open(os.path.join(a.out, 'apiDefinition.swagger.yaml'), 'w', encoding='utf-8') as f:
-        yaml.dump(spec, f, Dumper=Dumper, sort_keys=False, width=120, allow_unicode=True)
     definition = json.dumps(spec, indent=2, ensure_ascii=False)
     if len(definition.encode('utf-8')) >= MAX_DEFINITION_BYTES:   # indentation alone can push it over
         definition = json.dumps(spec, separators=(',', ':'), ensure_ascii=False)
         print('NOTE: apiDefinition.swagger.json written without indentation to stay under 1 MB')
-    with open(os.path.join(a.out, 'apiDefinition.swagger.json'), 'w', encoding='utf-8') as f:
-        f.write(definition)
-    with open(os.path.join(a.out, 'apiProperties.json'), 'w', encoding='utf-8') as f:
-        json.dump(props, f, indent=2)
-
+    errors = []
     ok, message = validate(spec)
-    n = sum(len(ops) for ops in paths.values())
-    print(f'{n} operations across {len(paths)} paths -> {a.out}  [{message}]')
+    if ok is False: errors.append(message)
     size = len(definition.encode('utf-8'))
     if size >= MAX_DEFINITION_BYTES:
-        ok = False
-        print(f'ERROR: apiDefinition.swagger.json is {size:,} bytes; Power Platform requires less than 1 MB')
+        errors.append(f'apiDefinition.swagger.json is {size:,} bytes; Power Platform requires less than 1 MB')
+
+    # a failed run must not leave a broken definition where `pac connector create` will pick it up
+    out = tempfile.mkdtemp(prefix='postman2pp-failed-') if errors else a.out
+    write_outputs(out, spec, definition, props)
+
+    n = sum(len(ops) for ops in paths.values())
+    print(f'{n} operations across {len(paths)} paths -> {out}  [{"validation failed" if ok is False else message}]')
     for w in warnings: print(f'WARNING: {w}')
-    if host.startswith('CHANGE_ME'): print('WARNING: host not found in collection - pass --host')
+    if len(a.title) > MAX_TITLE_CHARS:
+        print(f'WARNING: --title is {len(a.title)} characters; Microsoft allows at most {MAX_TITLE_CHARS}')
     if 'CHANGE_ME' in a.website + a.privacy_url: print('WARNING: pass --website and --privacy-url for connector metadata')
-    return 1 if ok is False else 0
+    for e in errors: print(f'ERROR: {e}', file=sys.stderr)
+    if errors:
+        print(f'ERROR: {a.out} was not changed; the failed output is in {out} for inspection', file=sys.stderr)
+    return 1 if errors else 0
 
 
 if __name__ == '__main__':

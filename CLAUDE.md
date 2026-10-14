@@ -14,20 +14,25 @@ The work follows an earlier BGL SF360 connector (that repo is not included here)
 
 ```bash
 pip install -r requirements.txt
-python3 -m unittest discover -s tests                     # all tests
-python3 -m unittest tests.test_postman2pp.EndToEnd        # one test class
+python3 -m unittest                                        # all tests (run from the repo root)
+python3 -m unittest tests.test_postman2pp.EndToEnd         # one test class
 
 python3 postman2pp.py <collection.json> --title "Business Fitness Active" \
-    --env <environment.json> --out ./connector [--host ...] [--website ... --privacy-url ...]
+    --env <environment.json> [--out ./connector] [--description ...] [--host ...] [--website ... --privacy-url ...]
 
 pac connector create --api-definition-file connector/apiDefinition.swagger.json \
     --api-properties-file connector/apiProperties.json --environment <env-id>
 ```
 
-- The converter exits with status 1 in three cases:
-  - Auth settings still contain undefined `{{variables}}`.
-  - Swagger validation fails.
+- The converter exits with status 1 when:
+  - auth settings still contain undefined `{{variables}}`, or an OAuth URL isn't `https`;
+  - no request has an absolute URL and `--host` isn't given;
+  - Swagger validation fails;
   - `apiDefinition.swagger.json` is 1 MB or larger, which Power Platform rejects. Indented JSON falls back to compact form before this limit is hit.
+
+  Input problems are raised as `ConfigError`. All errors go to stderr; summary, notes and warnings go to stdout.
+- Output goes to `--out` (default `connector/`, git-ignored) only when generation succeeds. If validation or the size check fails, `--out` is left untouched and the files go to a `postman2pp-failed-*` temp folder named in the error.
+- openapi-spec-validator checks only generic Swagger. Power Platform's own rules (e.g. DefaultResponseHasSchema, OperationHasManyResponsesWithSchema) need `paconn validate --api-def ...`.
 - `pac connector create` has no client-secret option, so the OAuth secret is entered on the connector's Security tab after creation.
 
 ## How `postman2pp.py` works
@@ -40,9 +45,21 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
   - Folders become tags. Nested folders are flattened, with the innermost folder winning, and tags with no operations are dropped.
   - Typed placeholders such as `<uuid>`, `<integer>` and `<dateTime>` in query values, path variables and example bodies become Swagger types and formats (`PLACEHOLDER_TYPES`).
   - A query key repeated in the collection means the API takes a list, so it becomes one `array` parameter with `collectionFormat: multi`.
-  - 2xx example bodies get inferred schemas. Every other status code points at the shared `Error` definition, which is the API's `{type, title, detail, status, traceId}` body.
-  - Requests are skipped with a `WARNING:` line in two cases: when they duplicate an earlier method and path, or when their URL is a runtime variable rather than an API path (e.g. the Documents API's `{{upload_url}}` blob upload).
-- **Labels.** `label()` builds every `x-ms-summary` from the field name in Title Case, keeping acronyms in capitals (`clientID` → "Client ID"). Parameter `name`s and property keys are never changed.
+  - Only the first non-empty 2xx example gets a schema. Error codes and `default` get a description only, because Power Platform uses one response schema per action and flags schemas on `default`. There is no `definitions` section.
+  - A parameter description starting "(Required)" (Business Fitness's convention) marks the parameter required, and the prefix is dropped.
+  - URLs are resolved against the environment only for their leading `{{base_url}}`-style variable (`resolve(..., leading_only=True)`), so environment test values never get baked into paths.
+  - `summary_text()` makes action names follow Microsoft's string guidance: no '/', at most 80 characters, ending alphanumeric. A trailing "(x)" becomes " - x".
+  - `WARNING:` lines cover several cases.
+    - A request is skipped when it:
+      - duplicates an earlier method and path, or differs from one only in letter case (Power Platform's PathRedefined rule);
+      - uses a host other than the collection's API host (the first absolute URL's host, not `--host`);
+      - has a runtime variable as its URL rather than an API path (e.g. the Documents API's `{{upload_url}}` blob upload).
+    - A request body on anything other than POST/PUT/PATCH is dropped and listed.
+    - A non-delete operation with no usable example success response is listed, because its output is untyped.
+    - A `--title` over 30 characters is listed.
+  - Business Fitness limits from its docs are applied to query parameters: `Search` gets `maxLength: 64`, and `PageSize` (any case) on `/detailed` paths gets `maximum: 100`.
+  - A plain-string URL with no structured query has its query parsed from the raw string (`request_url`).
+- **Labels and text.** `text()` strips only real HTML tags (so "a < b" survives) and flattens markdown. `label()` builds every `x-ms-summary` from the field name in Title Case, keeping acronyms in capitals (`clientID` → "Client ID"). Parameter `name`s and property keys are never changed.
 - **Example parsing.** `parse_json_loose()` scans character by character. It turns `{{vars}}` into strings and strips `//` and `/* */` comments only outside string literals, so URLs in examples survive.
 
 ## Manual review after generation
