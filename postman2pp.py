@@ -29,6 +29,8 @@ MAX_DEFINITION_BYTES = 1024 * 1024   # Power Platform rejects definitions of 1 M
 MAX_SUMMARY_CHARS = 80               # Microsoft's connector string guidance
 MAX_TITLE_CHARS = 30                 # Microsoft's connector string guidance
 OUTPUT_FILES = ('apiDefinition.swagger.yaml', 'apiDefinition.swagger.json', 'apiProperties.json')
+UNTYPED = {'type': 'object'}         # schema used when no example can be inferred; copy it, don't share it
+FETCH_METHODS = ('get', 'head')      # no body allowed (BodyOrFormDataParameterInFetchOperationNotAllowed)
 
 # Business Fitness Active API limits from its collection docs ("Searching", "Pagination")
 SEARCH_MAX_LENGTH = 64           # "The search field is typically restricted to 64 characters"
@@ -109,7 +111,7 @@ def placeholder_schema(v):
 
 
 def infer_schema(v, depth=0):
-    if depth > 8: return {'type': 'object'}
+    if depth > 8: return dict(UNTYPED)
     if isinstance(v, bool): return {'type': 'boolean'}
     if isinstance(v, int): return {'type': 'integer'}
     if isinstance(v, float): return {'type': 'number'}
@@ -121,7 +123,7 @@ def infer_schema(v, depth=0):
         return {'type': 'string'}
     if v is None: return {'type': 'string'}
     if isinstance(v, list):
-        return {'type': 'array', 'items': infer_schema(v[0], depth + 1) if v else {'type': 'object'}}
+        return {'type': 'array', 'items': infer_schema(v[0], depth + 1) if v else dict(UNTYPED)}
     if isinstance(v, dict):
         props = OrderedDict()
         for k, val in v.items():
@@ -297,20 +299,24 @@ def build_operation(it, req, method, path, url, folder, opid, warnings):
                                  'x-ms-summary': label(h['key']), 'x-ms-visibility': 'advanced'})
 
     body = req.get('body') or {}
-    if body.get('mode') == 'raw' and (body.get('raw') or '').strip() and method not in ('post', 'put', 'patch'):
-        # Power Platform forbids bodies on fetch operations (BodyOrFormDataParameterInFetchOperationNotAllowed)
-        warnings.append(f'"{name}": dropped the request body of a {method.upper()} request; '
-                        'Power Platform connectors can only send bodies with POST, PUT and PATCH')
-    elif body.get('mode') == 'raw' and method in ('post', 'put', 'patch'):
-        parsed = parse_json_loose(body.get('raw'))
+    mode = body.get('mode')
+    content = body.get(mode) if mode else None   # raw: str; formdata/urlencoded: list; file/graphql: dict
+    if isinstance(content, str): content = content.strip()
+    if content and method in FETCH_METHODS:
+        warnings.append(f'"{name}": dropped the request body of a {method.upper()} request; Power Platform '
+                        "doesn't allow a body on fetch operations (BodyOrFormDataParameterInFetchOperationNotAllowed)")
+    elif content and mode == 'raw':
+        parsed = parse_json_loose(content)
         op['parameters'].append({'name': 'body', 'in': 'body', 'required': True,
-                                 'schema': infer_schema(parsed) if parsed is not None else {'type': 'object'}})
-    elif body.get('mode') == 'formdata':
+                                 'schema': infer_schema(parsed) if parsed is not None else dict(UNTYPED)})
+    elif content and mode == 'formdata':
         op['consumes'] = ['multipart/form-data']
-        for f in body.get('formdata') or []:
+        for f in content:
             op['parameters'].append({'name': f['key'], 'in': 'formData', 'required': True,
                                      'type': 'file' if f.get('type') == 'file' else 'string',
                                      'x-ms-summary': label(f['key'])})
+    elif content:
+        warnings.append(f'"{name}": its {mode} request body isn\'t converted; add the parameters by hand')
 
     # Only the first success response carries a schema: the designer uses just one, and Power Platform's
     # validator flags schemas on 'default' (DefaultResponseHasSchema) or on several responses
@@ -324,10 +330,10 @@ def build_operation(it, req, method, path, url, folder, opid, warnings):
             example = (r.get('body') or '').strip()
             if example:
                 parsed = parse_json_loose(example)
-                responses[code]['schema'] = infer_schema(parsed) if parsed is not None else {'type': 'object'}
+                responses[code]['schema'] = infer_schema(parsed) if parsed is not None else dict(UNTYPED)
     if not any(c.startswith('2') for c in responses):
-        responses['200'] = {'description': 'OK', 'schema': {'type': 'object'}}
-    if method != 'delete' and all(r.get('schema') in (None, {'type': 'object'}) for r in responses.values()):
+        responses['200'] = {'description': 'OK', 'schema': dict(UNTYPED)}
+    if method != 'delete' and all(r.get('schema') in (None, UNTYPED) for r in responses.values()):
         warnings.append(f'"{name}" has no usable example success response, so its output is untyped; '
                         'add a response schema by hand')
     responses['default'] = {'description': 'Error'}

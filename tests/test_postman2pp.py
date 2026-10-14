@@ -277,6 +277,40 @@ class RequestHandling(unittest.TestCase):
         self.assertFalse(any(x['in'] == 'body' for x in spec['paths']['/s']['get']['parameters']))
         self.assertIn('"Search": dropped the request body of a GET request', output)
 
+    def test_body_on_a_delete_is_kept(self):
+        _, output, _, spec, _ = run_main(mini(
+            request('Bulk delete', 'DELETE', 'https://api.example.com/d', body='{"ids": ["<uuid>"]}')))
+        body = [x for x in spec['paths']['/d']['delete']['parameters'] if x['in'] == 'body'][0]
+        self.assertEqual(body['schema']['properties']['ids']['items']['format'], 'uuid')
+        self.assertNotIn('dropped', output)
+
+    def test_form_data_on_a_get_is_dropped_with_a_warning(self):
+        col = mini({'name': 'Upload', 'response': OK_RESPONSE, 'request': {
+            'method': 'GET', 'url': 'https://api.example.com/u',
+            'body': {'mode': 'formdata', 'formdata': [{'key': 'file', 'type': 'file'}]}}})
+        code, output, _, spec, _ = run_main(col)
+        self.assertEqual(code, 0, output)
+        op = spec['paths']['/u']['get']
+        self.assertEqual((op['parameters'], 'consumes' in op), ([], False))
+        self.assertIn('"Upload": dropped the request body of a GET request', output)
+
+    def test_unconverted_body_modes_are_warned_about(self):
+        col = mini({'name': 'Token', 'response': OK_RESPONSE, 'request': {
+            'method': 'POST', 'url': 'https://api.example.com/t',
+            'body': {'mode': 'urlencoded', 'urlencoded': [{'key': 'grant_type', 'value': 'x'}]}}})
+        _, output, _, _, _ = run_main(col)
+        self.assertIn('"Token": its urlencoded request body isn\'t converted', output)
+
+    def test_yaml_has_no_anchors_from_shared_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            col_path, env_path, out = (os.path.join(tmp, n) for n in ('col.json', 'env.json', 'out'))
+            with open(col_path, 'w') as f: json.dump(COLLECTION, f)
+            with open(env_path, 'w') as f: json.dump(ENV, f)
+            with contextlib.redirect_stdout(io.StringIO()):
+                p.main([col_path, '--title', 'Test', '--env', env_path, '--out', out])
+            with open(os.path.join(out, 'apiDefinition.swagger.yaml')) as f:
+                self.assertNotRegex(f.read(), r'[&*]id\d+')
+
     def test_active_api_search_and_page_size_limits(self):
         _, _, _, spec, _ = run_main(mini(
             request('List', 'GET', 'https://api.example.com/jobs?Search=<string>&PageSize=<integer>',

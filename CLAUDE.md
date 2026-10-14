@@ -54,7 +54,9 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
       - duplicates an earlier method and path, or differs from one only in letter case (Power Platform's PathRedefined rule);
       - uses a host other than the collection's API host (the first absolute URL's host, not `--host`);
       - has a runtime variable as its URL rather than an API path (e.g. the Documents API's `{{upload_url}}` blob upload).
-    - A request body on anything other than POST/PUT/PATCH is dropped and listed.
+    - A request body on GET/HEAD is dropped and listed (BodyOrFormDataParameterInFetchOperationNotAllowed); DELETE bodies are kept.
+    - Body modes other than `raw` and `formdata` (urlencoded, file, graphql) are listed as not converted.
+  - Schemas with no usable example use a copy of `UNTYPED`. Never share one dict object between places in the spec, or PyYAML writes `&id001` anchors into the YAML.
     - A non-delete operation with no usable example success response is listed, because its output is untyped.
     - A `--title` over 30 characters is listed.
   - Business Fitness limits from its docs are applied to query parameters: `Search` gets `maxLength: 64`, and `PageSize` (any case) on `/detailed` paths gets `maximum: 100`.

@@ -43,7 +43,8 @@
 
        In the current collection, "Create document" is listed as `GET /documents/v1/documents`, the same as "List documents (minimal)", so it is skipped. Report that to Business Fitness.
      - Operations with no usable example success response are listed. The collection has no example responses for the 7 Documents API actions, so their output is untyped until you add a response schema by hand.
-     - A body on a request other than `POST`, `PUT` or `PATCH` is dropped and listed, because Power Platform connectors can't send it.
+     - A body on a `GET` or `HEAD` request is dropped and listed, because Power Platform doesn't allow bodies on fetch operations. Bodies on `DELETE` are kept.
+     - Bodies other than raw JSON or form data (e.g. `x-www-form-urlencoded`) aren't converted and are listed, so you can add those parameters by hand.
      - A `--title` over 30 characters is flagged (Microsoft's limit).
 
 4. Review the YAML before deploying:
