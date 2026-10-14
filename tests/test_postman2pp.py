@@ -176,7 +176,7 @@ class EndToEnd(unittest.TestCase):
 
         self.assertIn('skipped "Duplicate of list"', output)
         self.assertIn('skipped "PUT file bytes"', output)
-        self.assertIn('"Get client (minimal)" has no usable example success response', output)
+        self.assertIn('"Get client (minimal)" (GetClientMinimal) has no usable example success response', output)
         self.assertNotIn('"Delete client" has no', output)
         self.assertEqual([t['name'] for t in spec['tags']], ['Clients'])   # empty folders dropped
 
@@ -389,6 +389,94 @@ class InputChecks(unittest.TestCase):
                 {'key': 'file', 'type': 'file'}, {'key': 'old', 'type': 'text', 'disabled': True}]}}})
         _, _, _, spec, _ = run_main(col)
         self.assertEqual([x['name'] for x in spec['paths']['/u']['post']['parameters']], ['file'])
+
+
+class Overrides(unittest.TestCase):
+    def run_with(self, overrides_text, beside_collection=False):
+        """Run main() on COLLECTION with an overrides file; returns (code, stdout, stderr, spec)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            col_path, env_path, out = (os.path.join(tmp, n) for n in ('col.json', 'env.json', 'out'))
+            with open(col_path, 'w') as f: json.dump(COLLECTION, f)
+            with open(env_path, 'w') as f: json.dump(ENV, f)
+            ov_path = os.path.join(tmp, p.DEFAULT_OVERRIDES if beside_collection else 'my-overrides.yaml')
+            with open(ov_path, 'w') as f: f.write(overrides_text)
+            args = [col_path, '--title', 'Test', '--env', env_path, '--out', out]
+            if not beside_collection: args += ['--overrides', ov_path]
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = p.main(args)
+            spec = None
+            if os.path.exists(os.path.join(out, 'apiDefinition.swagger.json')):
+                with open(os.path.join(out, 'apiDefinition.swagger.json')) as f: spec = json.load(f)
+        return code, stdout.getvalue(), stderr.getvalue(), spec
+
+    def test_overrides_are_merged(self):
+        code, output, _, spec = self.run_with('''
+operations:
+  GetClientMinimal:
+    description: Returns one client.
+    parameters:
+      id:
+        x-ms-dynamic-values: {operationId: ListClients, value-path: id, value-collection: records}
+    responses:
+      "200":
+        schema: {$ref: "#/definitions/Client"}
+  ListClients:
+    x-ms-visibility: important
+    parameters:
+      PageSize: {x-ms-visibility: advanced, description: null}
+definitions:
+  Client:
+    type: object
+    properties: {id: {type: string, format: uuid, x-ms-summary: ID}}
+''')
+        self.assertEqual(code, 0, output)
+        self.assertIn('applied overrides for 2 operations', output)
+        get_one = spec['paths']['/core/v1/clients/{id}']['get']
+        self.assertEqual(get_one['description'], 'Returns one client.')
+        self.assertEqual(get_one['parameters'][0]['x-ms-dynamic-values']['operationId'], 'ListClients')
+        self.assertEqual(get_one['parameters'][0]['format'], 'uuid')                 # generated keys kept
+        self.assertEqual(get_one['responses']['200']['schema'], {'$ref': '#/definitions/Client'})  # replaced
+        self.assertIn('Client', spec['definitions'])
+        page_size = [x for x in spec['paths']['/core/v1/clients']['get']['parameters'] if x['name'] == 'PageSize'][0]
+        self.assertEqual(page_size['x-ms-visibility'], 'advanced')
+        self.assertNotIn('description', page_size)                                    # null deletes
+        self.assertEqual(spec['paths']['/core/v1/clients']['get']['x-ms-visibility'], 'important')
+        self.assertNotIn('"Get client (minimal)" (GetClientMinimal) has no usable', output)   # now typed
+
+    def test_default_file_next_to_the_collection_is_used(self):
+        code, output, _, spec = self.run_with('operations: {ListClients: {description: From the default file.}}',
+                                              beside_collection=True)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(spec['paths']['/core/v1/clients']['get']['description'], 'From the default file.')
+
+    def test_stale_or_invalid_overrides_are_errors(self):
+        cases = [
+            ('operations: {RenamedAway: {description: x}}', 'no operation "RenamedAway"'),
+            ('operations: {ListClients: {parameters: {Nope: {description: x}}}}', '0 parameters named "Nope"'),
+            ('operations: {GetClientMinimal: {parameters: {id: null}}}', 'can\'t remove path parameter "id"'),
+            ('operations: {ListClients: {operationId: Other}}', "can't change its operationId"),
+            ('paths: {}', 'top-level keys must be operations and definitions'),
+            ('operations: [1, 2]', '"operations" must be a mapping'),
+            ('operations: {ListClients: [', 'cannot read'),
+        ]
+        for text, expected in cases:
+            code, _, stderr, spec = self.run_with(text)
+            self.assertEqual(code, 1, text)
+            self.assertIn(expected, stderr, text)
+            self.assertIsNone(spec, text)
+
+    def test_overrides_that_break_response_rules_are_warned_about(self):
+        _, output, _, _ = self.run_with('''
+operations:
+  ListClients:
+    responses:
+      "404": {schema: {type: object}}
+      default: {schema: {type: object}}
+''')
+        self.assertIn('"ListClients": the default response has a schema (DefaultResponseHasSchema)', output)
+        self.assertIn('"ListClients": more than one response has a schema (OperationHasManyResponsesWithSchema)',
+                      output)
 
 
 class Output(unittest.TestCase):

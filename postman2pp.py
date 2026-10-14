@@ -19,7 +19,7 @@ Review the generated YAML before deploying - inferred schemas are only as good a
 the examples in the collection - and run `paconn validate` for Power Platform's
 own rules.
 """
-import argparse, html, json, os, re, sys, tempfile
+import argparse, copy, html, json, os, re, sys, tempfile
 from collections import Counter, OrderedDict
 from urllib.parse import parse_qsl, urlparse
 
@@ -33,6 +33,8 @@ UNTYPED = {'type': 'object'}         # schema used when no example can be inferr
 FETCH_METHODS = ('get', 'head')      # no body allowed (BodyOrFormDataParameterInFetchOperationNotAllowed)
 RESERVED_PARAM = 'connectionId'      # reserved by Power Platform (ConnectionIdParameterNotAllowed)
 HEX_COLOR_RE = re.compile(r'#[0-9A-Fa-f]{6}')
+DEFAULT_OVERRIDES = 'connector-overrides.yaml'   # used automatically when it sits next to the collection
+OVERRIDE_SECTIONS = ('operations', 'definitions')
 
 # Business Fitness Active API limits from its collection docs ("Searching", "Pagination")
 SEARCH_MAX_LENGTH = 64           # "The search field is typically restricted to 64 characters"
@@ -359,16 +361,20 @@ def build_operation(it, req, method, path, url, folder, opid, warnings):
                 responses[code]['schema'] = infer_schema(parsed) if parsed is not None else dict(UNTYPED)
     if not any(c.startswith('2') for c in responses):
         responses['200'] = {'description': 'OK', 'schema': dict(UNTYPED)}
-    if method != 'delete' and all(r.get('schema') in (None, UNTYPED) for r in responses.values()):
-        warnings.append(f'"{name}" has no usable example success response, so its output is untyped; '
-                        'add a response schema by hand')
     responses['default'] = {'description': 'Error'}
     op['responses'] = responses
     return op
 
 
+def is_untyped(op):
+    """True when no response gives flow makers any typed output."""
+    return all(r.get('schema') in (None, UNTYPED) for r in op['responses'].values())
+
+
 def build_paths(col, env):
-    paths, tags, seen_ids, warnings = OrderedDict(), [], set(), []
+    """(paths, tags, host_guess, warnings, untyped). untyped maps the operationId of each non-delete
+    operation with no typed output to its request name, so main() can warn after overrides are applied."""
+    paths, tags, seen_ids, warnings, untyped = OrderedDict(), [], set(), [], {}
     path_case = {}       # lower-cased path -> path as first seen; Power Platform rejects case-only differences
     host_guess = None    # the collection's own API host: the first absolute URL's host
 
@@ -422,11 +428,12 @@ def build_paths(col, env):
             if op is None: continue   # skipped; build_operation has said why
             seen_ids.add(opid)
             paths.setdefault(path, OrderedDict())[method] = op
+            if method != 'delete' and is_untyped(op): untyped[opid] = name
 
     walk(col.get('item', []), None)
     used = {o['tags'][0] for ops in paths.values() for o in ops.values()}
     tags = [t for t in tags if t in used] + (['General'] if 'General' in used else [])
-    return paths, tags, host_guess, warnings
+    return paths, tags, host_guess, warnings, untyped
 
 
 def build_spec(a, paths, tags, host, secdefs, security):
@@ -470,6 +477,74 @@ def write_outputs(out, spec, definition, props):
         json.dump(props, f, indent=2)
 
 
+def load_overrides(path):
+    """Read an overrides file: {operations: {operationId: patch}, definitions: {name: schema}}."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as e:
+        raise ConfigError(f'cannot read {path}: {e}') from e
+    if not isinstance(data, dict) or set(data) - set(OVERRIDE_SECTIONS):
+        raise ConfigError(f'{path}: top-level keys must be {" and ".join(OVERRIDE_SECTIONS)}')
+    for section in OVERRIDE_SECTIONS:
+        if not isinstance(data.get(section) or {}, dict):
+            raise ConfigError(f'{path}: "{section}" must be a mapping')
+    return data
+
+
+def merge(base, patch):
+    """Deep-merge patch into base: mappings merge, null deletes a key, and a 'schema' is replaced whole
+    (merging two schemas would leave stale properties behind)."""
+    for k, v in patch.items():
+        if v is None: base.pop(k, None)
+        elif k != 'schema' and isinstance(v, dict) and isinstance(base.get(k), dict): merge(base[k], v)
+        else: base[k] = copy.deepcopy(v)
+
+
+def apply_overrides(spec, overrides, path):
+    """Apply hand edits that must survive regeneration. Parameters are addressed by name; an unknown
+    operation or parameter is an error, so an override can't silently stop applying after a rename."""
+    ops = {o['operationId']: o for d in spec['paths'].values() for o in d.values()}
+    for opid, patch in (overrides.get('operations') or {}).items():
+        op = ops.get(opid)
+        if op is None:
+            raise ConfigError(f'{path}: no operation "{opid}"; was its request renamed in the collection?')
+        if not isinstance(patch, dict):
+            raise ConfigError(f'{path}: operation "{opid}" must be a mapping')
+        patch = dict(patch)
+        if 'operationId' in patch:
+            raise ConfigError(f'{path}: operation "{opid}" can\'t change its operationId')
+        for name, param_patch in (patch.pop('parameters', None) or {}).items():
+            matches = [x for x in op['parameters'] if x['name'] == name]
+            if len(matches) != 1:
+                raise ConfigError(f'{path}: operation "{opid}" has {len(matches)} parameters named "{name}"')
+            if param_patch is None:
+                if matches[0]['in'] == 'path':
+                    raise ConfigError(f'{path}: "{opid}" can\'t remove path parameter "{name}"')
+                op['parameters'].remove(matches[0])
+            elif isinstance(param_patch, dict):
+                merge(matches[0], param_patch)
+            else:
+                raise ConfigError(f'{path}: parameter "{name}" of "{opid}" must be a mapping or null')
+        merge(op, patch)
+    if overrides.get('definitions'):
+        spec.setdefault('definitions', OrderedDict()).update(copy.deepcopy(overrides['definitions']))
+    return len(overrides.get('operations') or {})
+
+
+def response_rule_warnings(spec):
+    """Power Platform response rules an override could break (generated output never does)."""
+    notes = []
+    for ops in spec['paths'].values():
+        for op in ops.values():
+            if 'schema' in op['responses'].get('default', {}):
+                notes.append(f'"{op["operationId"]}": the default response has a schema (DefaultResponseHasSchema)')
+            if sum('schema' in r for r in op['responses'].values()) > 1:
+                notes.append(f'"{op["operationId"]}": more than one response has a schema '
+                             '(OperationHasManyResponsesWithSchema)')
+    return notes
+
+
 def check_options(a):
     """Raise ConfigError for option values Power Platform rejects; return warnings for doubtful ones."""
     for option, value in (('--website', a.website), ('--privacy-url', a.privacy_url)):
@@ -501,7 +576,11 @@ def main(argv=None):
     ap.add_argument('--website', default='https://CHANGE_ME')
     ap.add_argument('--privacy-url', default='https://CHANGE_ME')
     ap.add_argument('--brand-color', default='#007EE5')
+    ap.add_argument('--overrides', help='hand edits merged into the definition '
+                                        f'(default: {DEFAULT_OVERRIDES} next to the collection, if present)')
     a = ap.parse_args(argv)
+    beside_collection = os.path.join(os.path.dirname(os.path.abspath(a.collection)), DEFAULT_OVERRIDES)
+    overrides_path = a.overrides or (beside_collection if os.path.exists(beside_collection) else None)
 
     try:
         option_warnings = check_options(a)
@@ -510,18 +589,25 @@ def main(argv=None):
         if a.env:
             env.update(load_variables(load_json(a.env).get('values') or [], a.env))
         secdefs, security, conn_params = build_security(col, env, a.extra_scopes.split())
-        paths, tags, host_guess, warnings = build_paths(col, env)
+        paths, tags, host_guess, warnings, untyped = build_paths(col, env)
         host = a.host or host_guess
         if not host:
             raise ConfigError('no request has an absolute URL, so the API host is unknown; pass --host')
+        spec = build_spec(a, paths, tags, host, secdefs, security)
+        if overrides_path:
+            count = apply_overrides(spec, load_overrides(overrides_path), overrides_path)
+            print(f'NOTE: applied overrides for {count} operations from {overrides_path}')
     except ConfigError as e:
         print(f'ERROR: {e}', file=sys.stderr)
         return 1
     if 'oauth2_auth' in secdefs and not secdefs['oauth2_auth']['scopes']:
         warnings.append('no OAuth scopes in the collection, environment or --extra-scopes; '
                         'the identity provider may refuse to issue a token')
-    warnings += option_warnings
-    spec = build_spec(a, paths, tags, host, secdefs, security)
+    ops = {o['operationId']: o for d in spec['paths'].values() for o in d.values()}
+    warnings += [f'"{name}" ({opid}) has no usable example success response, so its output is untyped; '
+                 f'add a response schema in {overrides_path or DEFAULT_OVERRIDES}'
+                 for opid, name in untyped.items() if is_untyped(ops[opid])]
+    warnings += response_rule_warnings(spec) + option_warnings
     props = {'properties': {'connectionParameters': conn_params, 'iconBrandColor': a.brand_color,
                             'capabilities': [], 'publisher': a.publisher}}
 

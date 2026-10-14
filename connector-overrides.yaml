@@ -1,0 +1,27 @@
+# Hand edits merged into the generated connector by postman2pp.py, so they survive regeneration.
+# Used automatically when this file sits next to the collection file; otherwise pass --overrides.
+#
+# operations:            keyed by operationId (shown in the generator's warnings and in the YAML output)
+#   <OperationId>:
+#     description: ...   any operation field; mappings merge, null deletes a key
+#     x-ms-visibility: important | advanced | internal
+#     parameters:        keyed by parameter name; null removes a non-path parameter
+#       <name>:
+#         description: ...
+#         x-ms-visibility: advanced
+#         x-ms-dynamic-values: {operationId: ..., value-path: ..., value-title: ..., value-collection: ...}
+#     responses:
+#       "200":
+#         schema: {...}  replaces the generated schema whole (it isn't merged)
+# definitions:           shared schemas that responses above can $ref as "#/definitions/<name>"
+#
+# An unknown operationId or parameter stops the generator with an error, so an override can't silently
+# stop applying when Business Fitness renames a request. Write schemas only from documented or observed
+# API responses; never invent fields.
+#
+# Waiting for response schemas (the collection has no example responses for these Documents API
+# operations, so their output is untyped): ListDocumentsMinimal, ListDocumentsDetailed, GetDocument,
+# StartUploadSession, UpdateDocument, ListCabinets, GetDownloadLink.
+
+operations: {}
+definitions: {}

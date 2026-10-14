@@ -50,15 +50,22 @@
      - Missing OAuth scopes are flagged. The script no longer invents a `default` scope.
    - Unreadable or malformed collection and environment files, and a `--website` / `--privacy-url` that isn't an absolute URL (Power Platform rule UrlNotValid), stop the run with an error.
 
-4. Review the YAML before deploying:
-   - Check `securityDefinitions`: the script maps Postman OAuth2 → `accessCode` flow, API key → header key, and Bearer → an Authorization header connection parameter. Fill `clientId` in `apiProperties.json`. The connector uses a per-connector redirect URI (`redirectMode: GlobalPerConnector`): after creating the connector, copy the Redirect URL from its Security tab and register that exact URL with Business Fitness. The shared global redirect `https://global.consent.azure-apim.net/redirect` no longer works for new connections.
-   - Tighten inferred schemas. Types come from the example bodies in the collection: typed placeholders such as `"<boolean>"` are honoured, but a field that is `null` in the example is typed as string.
-   - Add `x-ms-dynamic-values` on ID parameters (e.g. client ID → list-clients operation) as done for BGL's `fundId`.
-   - Mark rarely used parameters `x-ms-visibility: advanced`.
-   - 62 operations have no description in the collection; add one where the summary isn't self-explanatory.
+4. Review the output, and put every hand edit in `connector-overrides.yaml`, never in `connector/`:
+   - **Why:** `connector/` is regenerated from the collection each time, so edits made there are lost. `connector-overrides.yaml` is committed and merged in on every run. It's used automatically when it sits next to the collection file; otherwise pass `--overrides <file>`. The file's header explains the format.
+   - **What it checks:** operations are keyed by `operationId` and parameters by name. A name that no longer exists, for example after Business Fitness renames a request, stops the run with an error rather than silently dropping your edit. Mappings merge, `null` deletes a key, and a response `schema` is replaced whole.
+   - **What to put in it:**
+     - response schemas for operations the generator flags as untyped (currently the 7 Documents API operations listed in the file);
+     - tighter types where inference is weak: typed placeholders such as `"<boolean>"` are honoured, but a field that is `null` in the example is typed as string;
+     - `x-ms-dynamic-values` on ID parameters (e.g. client ID → list-clients operation), as done for BGL's `fundId`;
+     - `x-ms-visibility: advanced` on rarely used parameters;
+     - descriptions where the summary isn't self-explanatory (62 operations have none in the collection).
+
+     Write schemas only from documented or observed API responses.
+   - **Not in the overrides file:** check `securityDefinitions`. The script maps Postman OAuth2 → `accessCode` flow, API key → header key, and Bearer → an Authorization header connection parameter. Fill `clientId` in `apiProperties.json`. The connector uses a per-connector redirect URI (`redirectMode: GlobalPerConnector`): after creating the connector, copy the Redirect URL from its Security tab and register that exact URL with Business Fitness. The shared global redirect `https://global.consent.azure-apim.net/redirect` no longer works for new connections.
    - Run Power Platform's own validator, which checks rules that `openapi-spec-validator` doesn't: `paconn validate --api-def connector/apiDefinition.swagger.json` (needs `paconn login`).
      - Expect about 25 "PartialDuplicateOperationPath" warnings. They come from the API's design, with pairs like `/clients/entities/{id}` and `/clients/entities/detailed`, and can't be avoided.
      - Watch for "UnrecognizedTypeFormat" (the output uses `format: uuid`) and "CollectionFormatValueNotSupported" (`multi`). Microsoft's docs don't say whether these are supported.
+     - The generator also warns if an override puts a schema on `default` or on more than one response, which Power Platform flags.
 
 5. Deploy:
 

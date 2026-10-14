@@ -16,7 +16,11 @@ The work follows an earlier BGL SF360 connector (that repo is not included here)
 pip install -r requirements.txt
 python3 -m unittest                                        # all tests (run from the repo root)
 python3 -m unittest tests.test_postman2pp.EndToEnd         # one test class
+```
 
+CI (`.github/workflows/tests.yml`) runs the same `python -m unittest` on Python 3.10 and 3.14 for every push and pull request. Keep the code working on 3.10+ (the suite also passes on 3.9).
+
+```bash
 python3 postman2pp.py <collection.json> --title "Business Fitness Active" \
     --env <environment.json> [--out ./connector] [--description ...] [--host ...] [--website ... --privacy-url ...]
 
@@ -67,6 +71,14 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
 - **Labels and text.** `text()` strips only real HTML tags (so "a < b" survives) and flattens markdown. `label()` builds every `x-ms-summary` from the field name in Title Case, keeping acronyms in capitals (`clientID` → "Client ID"). Parameter `name`s and property keys are never changed.
 - **Example parsing.** `parse_json_loose()` scans character by character. It turns `{{vars}}` into strings and strips `//` and `/* */` comments only outside string literals, so URLs in examples survive.
 
+## Overrides
+
+Hand edits never go in the generated `connector/` folder. They go in `connector-overrides.yaml`, which `main()` applies after `build_spec` and before validation.
+- **Where it's found:** next to the collection file automatically, or via `--overrides`.
+- **How it's applied** (`load_overrides` / `apply_overrides` / `merge`): operations are keyed by `operationId` and parameters by name. Mappings merge, `null` deletes a key, and a `schema` is replaced whole. `definitions` are added to the spec.
+- **When it fails:** an unknown operation or parameter, removing a path parameter, or changing an `operationId` is a `ConfigError`, so a Business Fitness rename can't make an override silently stop applying.
+- **Warnings after merging:** the "untyped output" warnings are computed after overrides (`build_paths` returns `untyped`; `is_untyped`). `response_rule_warnings` flags overrides that put a schema on `default` or on several responses.
+
 ## Manual review after generation
 
-docs/connector-guide.md, step 4, lists the hand edits to make before deploying: `clientId`, the redirect URL registration, tightening inferred types, `x-ms-dynamic-values`, and advanced visibility.
+docs/connector-guide.md, step 4, lists the review before deploying: `clientId`, the redirect URL registration, `paconn validate`, and which edits belong in `connector-overrides.yaml` (response schemas, tighter types, `x-ms-dynamic-values`, advanced visibility, descriptions).

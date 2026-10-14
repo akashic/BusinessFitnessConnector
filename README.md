@@ -28,6 +28,7 @@ It also turns the collection into something Power Platform will accept:
 - Typed placeholders such as `<uuid>` and `<boolean>` become real types, and parameters documented as "(Required)" are required.
 - Each action has a single response schema, which is what Power Platform's designer and validator expect.
 - Requests that can't be connector actions are skipped with a warning, such as the direct blob upload, a duplicated route or a request on another host. Actions with no example response are flagged too.
+- Hand edits (response schemas, dropdowns, descriptions) live in `connector-overrides.yaml` and are merged in on every run, so regenerating never loses them.
 - It stops with an error if auth settings are missing or not `https`, if the API host is unknown, or if the result is invalid or too large for Power Platform (1 MB or more). A failed run never overwrites the output folder.
 
 ## Repository layout
@@ -36,6 +37,7 @@ It also turns the collection into something Power Platform will accept:
 |---|---|
 | `postman2pp.py` | The generator. |
 | `tests/` | Unit and end-to-end tests for the generator (`unittest`, no network needed). |
+| `connector-overrides.yaml` | Hand edits merged into the generated connector on every run. Keyed by operation ID; stale entries are an error. |
 | `docs/connector-guide.md` | Full guide: build and deploy steps, review checklist, API facts (auth, rate limits, pagination, errors), and open questions for Business Fitness. |
 | `requirements.txt` | Python dependencies (PyYAML, openapi-spec-validator). |
 | `CLAUDE.md` | Notes for Claude Code working in this repo. |
@@ -67,7 +69,7 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
     --api-properties-file connector/apiProperties.json --environment <env-id>
 ```
 
-Run the tests with `python3 -m unittest` from the repo root.
+Run the tests with `python3 -m unittest` from the repo root. GitHub Actions runs them on every push and pull request (`.github/workflows/tests.yml`, Python 3.10 and 3.14).
 
 ## Things to know before using it
 
