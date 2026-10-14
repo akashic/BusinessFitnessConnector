@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo builds a Microsoft Power Platform custom connector for the Business Fitness "Active" API. No Microsoft-published connector exists. The API's endpoints come only from Business Fitness's Postman collection. **Never invent endpoints, paths or schemas**; everything is generated from the real collection.
 
-The collection JSON can be downloaded directly from `https://development.businessfitness.com/api/collections/31711831/2s9Yynm4V5?segregateAuth=true&versionTag=latest`. Its folder and request descriptions are the API documentation: auth, scopes, rate limits, pagination and error format. The environment template that holds `auth_url`, `access_token_url` and `scopes` is not public. README.md records the API facts and the open questions for Business Fitness.
+The collection JSON can be downloaded directly from `https://development.businessfitness.com/api/collections/31711831/2s9Yynm4V5?segregateAuth=true&versionTag=latest`. Its folder and request descriptions are the API documentation: auth, scopes, rate limits, pagination and error format. The environment template that holds `auth_url`, `access_token_url` and `scopes` is not public. docs/connector-guide.md records the API facts and the open questions for Business Fitness.
 
 The work follows an earlier BGL SF360 connector (that repo is not included here). Its conventions are `x-ms-summary` on fields, tags taken from Postman folders, operationIds taken from request names, and `x-ms-dynamic-values` on ID parameters.
 
@@ -47,4 +47,4 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
 
 ## Manual review after generation
 
-README.md, step 4, lists the hand edits to make before deploying: `clientId`, the redirect URL registration, tightening inferred types, `x-ms-dynamic-values`, and advanced visibility.
+docs/connector-guide.md, step 4, lists the hand edits to make before deploying: `clientId`, the redirect URL registration, tightening inferred types, `x-ms-dynamic-values`, and advanced visibility.
