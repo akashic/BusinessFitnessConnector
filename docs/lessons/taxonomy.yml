@@ -31,6 +31,7 @@ tech:
   - power-automate
   - power-platform-custom-connectors
   - postman            # collections and Documenter sites as API sources
+  - paconn             # Power Platform Connectors CLI (login, validate, create, update, download)
   - dotnet
   - system-text-json
   - bicep

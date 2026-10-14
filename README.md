@@ -38,6 +38,7 @@ It also turns the collection into something Power Platform will accept:
 | `postman2pp.py` | The generator. |
 | `tests/` | Unit and end-to-end tests for the generator (`unittest`, no network needed). |
 | `connector-overrides.yaml` | Hand edits merged into the generated connector on every run. Keyed by operation ID; stale entries are an error. |
+| `docs/guides/` | Reusable guides for any connector project, e.g. [testing a connector with paconn](docs/guides/paconn-connector-testing.md). |
 | `docs/connector-guide.md` | Full guide: build and deploy steps, review checklist, API facts (auth, rate limits, pagination, errors), and open questions for Business Fitness. |
 | `requirements.txt` | Python dependencies (PyYAML, openapi-spec-validator). |
 | `CLAUDE.md` | Notes for Claude Code working in this repo. |

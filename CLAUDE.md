@@ -36,7 +36,7 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
 
   Input problems are raised as `ConfigError`. All errors go to stderr; summary, notes and warnings go to stdout.
 - Output goes to `--out` (default `connector/`, git-ignored) only when generation succeeds. If validation or the size check fails, `--out` is left untouched and the files go to a `postman2pp-failed-*` temp folder named in the error.
-- openapi-spec-validator checks only generic Swagger. Power Platform's own rules (e.g. DefaultResponseHasSchema, OperationHasManyResponsesWithSchema) need `paconn validate --api-def ...`.
+- openapi-spec-validator checks only generic Swagger. Power Platform's own rules (e.g. DefaultResponseHasSchema, OperationHasManyResponsesWithSchema) need Power Platform's validator. `paconn validate --api-def ...` always runs it with certification rules on (`enableConnectorCertificationRules=true`), which also demands descriptions, `info.contact` and no `collectionFormat: multi`. Those are certification-only. The validator also reports in stages, and certification-off checks are lenient. On 14 Oct 2026 the real definition passed with certification rules off, and passed the full certification rule set once those three were filled in, apart from 25 PartialDuplicateOperationPath warnings. See docs/connector-guide.md, step 4, and docs/guides/paconn-connector-testing.md.
 - `pac connector create` has no client-secret option, so the OAuth secret is entered on the connector's Security tab after creation.
 
 ## How `postman2pp.py` works

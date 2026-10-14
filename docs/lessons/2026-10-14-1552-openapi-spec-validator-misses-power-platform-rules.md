@@ -35,7 +35,7 @@ provenance:
     InputChecks.test_reserved_connection_id_parameter and test_invalid_website_url_is_an_error); the definition
     at commit 1c292fa put an Error schema on 'default' and every error code for all 133 operations
   author:
-related: [2026-10-14-1529-review-generator-against-real-collection]
+related: [2026-10-14-1529-review-generator-against-real-collection, 2026-10-14-1703-paconn-validate-always-applies-certification-rules, 2026-10-14-1703-power-platform-validator-reports-in-stages, 2026-10-14-1703-certification-off-validation-is-lenient]
 proposed_tags: []
 ---
 
@@ -46,10 +46,10 @@ To model Business Fitness's error body, `postman2pp.py` pointed `default` and ev
 - "DefaultResponseHasSchema": the 'default' response should not have schema definition;
 - "OperationHasManyResponsesWithSchema": only one schema will be used in the designer.
 
-A later review found a third case: a `GET` with form data passed openapi-spec-validator, although Microsoft's "BodyOrFormDataParameterInFetchOperationNotAllowed" rule forbids it. A fifth review found two more: a parameter named `connectionId` ("ConnectionIdParameterNotAllowed") and a connector-metadata website that isn't an absolute URL ("UrlNotValid"). The same page also lists rules the output may still trip and that no local tool checks: "UnrecognizedTypeFormat" (`format: uuid`), "CollectionFormatValueNotSupported" (`multi`) and "PartialDuplicateOperationPath" (`/x/{id}` next to `/x/detailed`).
+A later review found a third case: a `GET` with form data passed openapi-spec-validator, although Microsoft's "BodyOrFormDataParameterInFetchOperationNotAllowed" rule forbids it. A fifth review found two more: a parameter named `connectionId` ("ConnectionIdParameterNotAllowed") and a connector-metadata website that isn't an absolute URL ("UrlNotValid"). Running Power Platform's own validator later (14 Oct 2026) settled the open items. `format: uuid` was accepted. `multi` was rejected only under certification rules. The definition produced 25 "PartialDuplicateOperationPath" warnings from the API's routes. That validator has gaps of its own: it reports in stages, its certification-off mode is lenient, and it never flagged the GET form data. See the related lessons.
 
 ## Why it happened
-openapi-spec-validator implements the OpenAPI 2.0 specification. Power Platform adds its own rules for its designer and runtime, published only as Microsoft's error list and enforced by `paconn validate` and by import.
+openapi-spec-validator implements the OpenAPI 2.0 specification. Power Platform adds its own rules for its designer and runtime, published as Microsoft's error list and checked by Power Platform's validateApiSwagger endpoint (`paconn validate` always runs it in certification mode). Whether importing in the maker portal enforces the same rules is untested.
 
 ## What to do instead
 - Give one response a schema: the first non-empty 2xx example. Give error codes and `default` a description only, and read error bodies from the action's outputs in flows.

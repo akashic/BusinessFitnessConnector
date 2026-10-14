@@ -28,7 +28,7 @@ provenance:
     tests/test_postman2pp.py EndToEnd.test_collection); Business Fitness collection request
     GET /workflow/v1/deliverables, which repeats ExternalId and Code
   author:
-related: [2026-10-14-1529-review-generator-against-real-collection]
+related: [2026-10-14-1529-review-generator-against-real-collection, 2026-10-14-1703-paconn-validate-always-applies-certification-rules]
 proposed_tags: []
 ---
 
@@ -42,7 +42,8 @@ Postman has no array type for query parameters, so its generated docs show a lis
 
 ## What to do instead
 - Count keys per request. When a key appears more than once, emit a single `type: array` parameter with `items` typed from the placeholder and `collectionFormat: multi`, which sends `?Key=a&Key=b`.
-- Unverified: Microsoft's docs don't confirm that Power Platform sends `multi` arrays as repeated keys. Test a call with two values on the deployed connector (docs/connector-guide.md, step 6). If it doesn't, the fallback is a single string parameter.
+- Power Platform's validator (14 Oct 2026) accepts `collectionFormat: multi` for a private custom connector but rejects it under certification rules ("The 'collectionFormat' keyword value 'Multi' is not supported"). For certification use `csv`, no `collectionFormat`, or a single-value string; all three passed. See [paconn-validate-always-applies-certification-rules](2026-10-14-1703-paconn-validate-always-applies-certification-rules.md).
+- Still untested: whether Power Platform actually sends `multi` arrays as repeated keys at runtime. Test a call with two values on the deployed connector (docs/connector-guide.md, step 6). If it doesn't, the fallback is a single string parameter.
 
 ## How to recognise it early
 The validator error names a query parameter that appears twice, or `grep -o 'Key=' <raw url> | sort | uniq -d` finds repeats.

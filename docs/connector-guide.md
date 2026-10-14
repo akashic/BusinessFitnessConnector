@@ -63,8 +63,17 @@
      Write schemas only from documented or observed API responses.
    - **Not in the overrides file:** check `securityDefinitions`. The script maps Postman OAuth2 → `accessCode` flow, API key → header key, and Bearer → an Authorization header connection parameter. Fill `clientId` in `apiProperties.json`. The connector uses a per-connector redirect URI (`redirectMode: GlobalPerConnector`): after creating the connector, copy the Redirect URL from its Security tab and register that exact URL with Business Fitness. The shared global redirect `https://global.consent.azure-apim.net/redirect` no longer works for new connections.
    - Run Power Platform's own validator, which checks rules that `openapi-spec-validator` doesn't: `paconn validate --api-def connector/apiDefinition.swagger.json` (needs `paconn login`).
-     - Expect about 25 "PartialDuplicateOperationPath" warnings. They come from the API's design, with pairs like `/clients/entities/{id}` and `/clients/entities/detailed`, and can't be avoided.
-     - Watch for "UnrecognizedTypeFormat" (the output uses `format: uuid`) and "CollectionFormatValueNotSupported" (`multi`). Microsoft's docs don't say whether these are supported.
+     - **`paconn validate` always applies the certification rules** (the request sets `enableConnectorCertificationRules=true`). Those are the stricter rules for connectors Microsoft publishes, and they're more than a private custom connector needs. [Testing a connector with paconn](guides/paconn-connector-testing.md) explains how to run the check with those rules off, and how to read the results.
+     - **The validator reports in stages.** Errors from a later stage only appear once an earlier stage passes.
+     - **Results on 14 Oct 2026, against the real collection:**
+       - With certification rules off, the definition passed with 0 errors and 0 warnings. That check is lenient, though: in a test it also passed a schema on `default` and form data on a `GET`.
+       - With certification rules on, stage one failed on:
+         - 90 operations and parameters with no `description`;
+         - the missing `info.contact`;
+         - 9 "Multi is not supported" errors on the list filters (`collectionFormat: multi`).
+       - With those three temporarily filled in, the full certification rule set passed with **0 errors**. The only findings were 25 "PartialDuplicateOperationPath" warnings, from routes like `/clients/groups/detailed` next to `/clients/groups/{id}`, which come from the API's design.
+       - `format: uuid` was accepted at every stage.
+     - **If you ever want the connector certified:** add the descriptions and contact through `connector-overrides.yaml`, and change the list filters. With `csv`, no `collectionFormat`, or a single-value string, the "Multi" errors disappear.
      - The generator also warns if an override puts a schema on `default` or on more than one response, which Power Platform flags.
 
 5. Deploy:
@@ -74,7 +83,7 @@
 
    `pac connector create` has no option for the OAuth client secret, so enter it on the connector's Security tab after creation. (The older `paconn create` CLI accepts `--secret`.)
 
-6. Test a list endpoint with a repeated filter (e.g. deliverables with two `ExternalId` values). Repeated query keys are generated as arrays with `collectionFormat: multi`, and Microsoft's docs don't confirm Power Platform sends those as repeated keys.
+6. Test a list endpoint with a repeated filter (e.g. deliverables with two `ExternalId` values). Repeated query keys are generated as arrays with `collectionFormat: multi`. Power Platform's validator accepts that for a private custom connector (see step 4), but whether the runtime actually sends repeated keys is still untested.
 
 ## Using the connector in flows
 
