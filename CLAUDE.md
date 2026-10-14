@@ -22,7 +22,8 @@ CI (`.github/workflows/tests.yml`) runs the same `python -m unittest` on Python 
 
 ```bash
 python3 postman2pp.py <collection.json> --title "Business Fitness Active" \
-    --env <environment.json> [--out ./connector] [--description ...] [--host ...] [--website ... --privacy-url ...]
+    --env <environment.json> [--out ./connector] [--description ...] [--publisher ...] [--host ...] \
+    [--overrides connector-overrides.yaml] [--website ... --privacy-url ...]
 
 pac connector create --api-definition-file connector/apiDefinition.swagger.json \
     --api-properties-file connector/apiProperties.json --environment <env-id>

@@ -52,7 +52,8 @@ Requires Python 3 and, to deploy, the [Power Platform CLI](https://learn.microso
 ```bash
 pip install -r requirements.txt
 
-# 1. Get the collection (public)
+# 1. Get the collection (public). Save it in the repo root: connector-overrides.yaml is
+#    only applied automatically when it sits next to the collection file
 curl -o active-api.json \
   "https://development.businessfitness.com/api/collections/31711831/2s9Yynm4V5?segregateAuth=true&versionTag=latest"
 
@@ -63,7 +64,9 @@ curl -o active-api.json \
 python3 postman2pp.py active-api.json --title "Business Fitness Active" \
     --env active.postman_environment.json \
     --description "<what the connector is for>" \
+    --publisher "<your organisation>" \
     --website <your website> --privacy-url <your privacy policy URL>   # writes ./connector
+# check the output shows "NOTE: applied overrides ..."; without --publisher, apiProperties.json says YOUR_ORG
 
 # 4. Review, then deploy (see the guide for the review checklist)
 pac connector create --api-definition-file connector/apiDefinition.swagger.json \

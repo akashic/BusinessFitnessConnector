@@ -13,6 +13,8 @@
 1. Get the collection, either:
    - download the JSON above, or
    - open https://development.businessfitness.com/, click **Run in Postman**, fork it, and use **... > Export > Collection v2.1** → `active-api.postman_collection.json`.
+
+   Save it in the **repo root**, next to `connector-overrides.yaml`. The generator applies that file automatically only when it's beside the collection; if the collection is elsewhere, pass `--overrides connector-overrides.yaml`, or your hand edits won't be applied.
 2. Get an environment file that defines `auth_url`, `access_token_url` and `scopes`. Fork the "Active API Environment Template" in Postman, fill it in, and export it (Environments > ... > Export) → `active.postman_environment.json`.
 3. Generate the connector files:
 
@@ -21,7 +23,10 @@
            --title "Business Fitness Active" \
            --description "Work with clients, jobs, workpapers, ledgers and documents in Business Fitness Active." \
            --env active.postman_environment.json \
+           --publisher "<your organisation>" \
            --website <your connector website> --privacy-url <your privacy policy URL>
+
+   `--publisher` goes into `apiProperties.json`; without it the connector ships with the placeholder `YOUR_ORG`. The run prints `NOTE: applied overrides for … operations from …` when `connector-overrides.yaml` was picked up. If that line is missing, check where the collection file is.
 
    Output goes to `./connector` (change with `--out`): `apiDefinition.swagger.yaml` / `.json` (Swagger 2.0, validated) and `apiProperties.json`. `connector/` and `*.postman_environment.json` are git-ignored; environments can hold client IDs, test record IDs or tokens.
    - The script exits with an error (code 1, message on stderr) if:
