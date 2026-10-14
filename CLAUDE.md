@@ -58,7 +58,10 @@ pac connector create --api-definition-file connector/apiDefinition.swagger.json 
     - Body modes other than `raw` and `formdata` (urlencoded, file, graphql) are listed as not converted.
   - Schemas with no usable example use a copy of `UNTYPED`. Never share one dict object between places in the spec, or PyYAML writes `&id001` anchors into the YAML.
     - A non-delete operation with no usable example success response is listed, because its output is untyped.
-    - A `--title` over 30 characters is listed.
+    - `check_options()` lists a `--title` over 30 characters and a `--brand-color` that isn't `#RRGGBB`. It raises `ConfigError` for a `--website`/`--privacy-url` that isn't an absolute URL (UrlNotValid).
+    - A `connectionId` parameter (reserved: ConnectionIdParameterNotAllowed) is dropped, or the request is skipped if it's a path parameter (`build_operation` returns `None`).
+    - Missing OAuth scopes are listed; no placeholder scope is invented.
+  - `load_json()` / `load_variables()` turn unreadable, non-object or keyless input into `ConfigError`, so bad files give one `ERROR:` line, not a traceback.
   - Business Fitness limits from its docs are applied to query parameters: `Search` gets `maxLength: 64`, and `PageSize` (any case) on `/detailed` paths gets `maximum: 100`.
   - A plain-string URL with no structured query has its query parsed from the raw string (`request_url`).
 - **Labels and text.** `text()` strips only real HTML tags (so "a < b" survives) and flattens markdown. `label()` builds every `x-ms-summary` from the field name in Title Case, keeping acronyms in capitals (`clientID` → "Client ID"). Parameter `name`s and property keys are never changed.

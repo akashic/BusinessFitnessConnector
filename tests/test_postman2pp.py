@@ -325,6 +325,72 @@ class RequestHandling(unittest.TestCase):
         self.assertEqual((detailed['minimum'], detailed['maximum']), (1, 100))
 
 
+class InputChecks(unittest.TestCase):
+    def run_files(self, collection_text, env_text=None, extra=()):
+        """Run main() on raw file contents; returns (exit code, stderr)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            col_path = os.path.join(tmp, 'col.json')
+            with open(col_path, 'w') as f: f.write(collection_text)
+            args = [col_path, '--title', 'Test', '--out', os.path.join(tmp, 'out'), *extra]
+            if env_text is not None:
+                with open(os.path.join(tmp, 'env.json'), 'w') as f: f.write(env_text)
+                args += ['--env', os.path.join(tmp, 'env.json')]
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                code = p.main(args)
+        return code, stderr.getvalue()
+
+    def test_bad_input_files_give_an_error_not_a_traceback(self):
+        good = json.dumps(COLLECTION)
+        cases = [
+            ('{not json', None, 'cannot read'),
+            ('[]', None, 'not a Postman collection'),
+            (good, '{"values": [{"value": "x"}]}', 'variable entry without a "key"'),
+        ]
+        for col_text, env_text, expected in cases:
+            code, stderr = self.run_files(col_text, env_text)
+            self.assertEqual(code, 1, expected)
+            self.assertIn(expected, stderr)
+        code, stderr = self.run_files(good, extra=['--env', '/nonexistent/env.json'])
+        self.assertEqual((code, 'cannot read /nonexistent/env.json' in stderr), (1, True), stderr)
+
+    def test_invalid_website_url_is_an_error(self):
+        code, stderr = self.run_files(json.dumps(COLLECTION), json.dumps(ENV), extra=['--website', 'not a url'])
+        self.assertEqual(code, 1)
+        self.assertIn('--website must be an absolute URL', stderr)
+
+    def test_odd_brand_colour_is_warned_about(self):
+        _, output, _, spec, _ = run_main(COLLECTION, extra=['--brand-color', 'blue'])
+        self.assertIsNotNone(spec)
+        self.assertIn("--brand-color 'blue' is not a #RRGGBB colour", output)
+
+    def test_no_scopes_means_no_invented_default_scope(self):
+        _, output, _, spec, props = run_main(mini(request('A', 'GET', 'https://api.example.com/a',
+                                                          responses=OK_RESPONSE)), extra=['--extra-scopes', ''])
+        self.assertEqual(spec['securityDefinitions']['oauth2_auth']['scopes'], {})
+        self.assertEqual(props['properties']['connectionParameters']['token']['oAuthSettings']['scopes'], [])
+        self.assertIn('no OAuth scopes', output)
+
+    def test_reserved_connection_id_parameter(self):
+        code, output, _, spec, _ = run_main(mini(
+            request('In query', 'GET', 'https://api.example.com/q?connectionId=<string>&Page=<integer>',
+                    query=[{'key': 'connectionId', 'value': '<string>'}, {'key': 'Page', 'value': '<integer>'}],
+                    responses=OK_RESPONSE),
+            request('In path', 'GET', 'https://api.example.com/c/:connectionId', responses=OK_RESPONSE)))
+        self.assertEqual(code, 0, output)
+        self.assertEqual([x['name'] for x in spec['paths']['/q']['get']['parameters']], ['Page'])
+        self.assertIn('"In query": dropped its "connectionId" query parameter', output)
+        self.assertNotIn('/c/{connectionId}', spec['paths'])
+        self.assertIn('skipped "In path": its path uses "connectionId"', output)
+
+    def test_disabled_form_fields_are_skipped(self):
+        col = mini({'name': 'Upload', 'response': OK_RESPONSE, 'request': {
+            'method': 'POST', 'url': 'https://api.example.com/u', 'body': {'mode': 'formdata', 'formdata': [
+                {'key': 'file', 'type': 'file'}, {'key': 'old', 'type': 'text', 'disabled': True}]}}})
+        _, _, _, spec, _ = run_main(col)
+        self.assertEqual([x['name'] for x in spec['paths']['/u']['post']['parameters']], ['file'])
+
+
 class Output(unittest.TestCase):
     def test_api_properties_shape(self):
         _, _, _, _, props = run_main(COLLECTION)

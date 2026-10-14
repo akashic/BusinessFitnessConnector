@@ -21,7 +21,7 @@ own rules.
 """
 import argparse, html, json, os, re, sys, tempfile
 from collections import Counter, OrderedDict
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 
 import yaml
 
@@ -31,6 +31,8 @@ MAX_TITLE_CHARS = 30                 # Microsoft's connector string guidance
 OUTPUT_FILES = ('apiDefinition.swagger.yaml', 'apiDefinition.swagger.json', 'apiProperties.json')
 UNTYPED = {'type': 'object'}         # schema used when no example can be inferred; copy it, don't share it
 FETCH_METHODS = ('get', 'head')      # no body allowed (BodyOrFormDataParameterInFetchOperationNotAllowed)
+RESERVED_PARAM = 'connectionId'      # reserved by Power Platform (ConnectionIdParameterNotAllowed)
+HEX_COLOR_RE = re.compile(r'#[0-9A-Fa-f]{6}')
 
 # Business Fitness Active API limits from its collection docs ("Searching", "Pagination")
 SEARCH_MAX_LENGTH = 64           # "The search field is typically restricted to 64 characters"
@@ -169,8 +171,21 @@ def resolve(s, env, leading_only=False):
 
 
 def load_json(path):
-    with open(path, encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ConfigError(f'cannot read {path}: {e}') from e
+    if not isinstance(data, dict):
+        raise ConfigError(f'{path} is not a Postman collection or environment (expected a JSON object)')
+    return data
+
+
+def load_variables(entries, path):
+    """{key: value} from Postman variable entries (collection 'variable' or environment 'values')."""
+    if any(not isinstance(v, dict) or 'key' not in v for v in entries):
+        raise ConfigError(f'{path} has a variable entry without a "key"')
+    return {v['key']: v.get('value', '') for v in entries if v.get('enabled', True) and not v.get('disabled')}
 
 
 def auth_config(auth, kind):
@@ -203,7 +218,7 @@ def build_security(col, env, extra_scopes):
         for a in auths:
             if a.get('type') == 'oauth2':
                 scopes += (resolve(auth_config(a, 'oauth2').get('scope'), env) or '').split()
-        scopes = list(OrderedDict.fromkeys(scopes + extra_scopes)) or ['default']
+        scopes = list(OrderedDict.fromkeys(scopes + extra_scopes))   # may be empty; main() warns
         auth_url = cfg.get('authUrl') or 'https://CHANGE_ME/authorize'
         token_url = cfg.get('accessTokenUrl') or 'https://CHANGE_ME/token'
         secdefs['oauth2_auth'] = {'type': 'oauth2', 'flow': 'accessCode', 'authorizationUrl': auth_url,
@@ -312,11 +327,22 @@ def build_operation(it, req, method, path, url, folder, opid, warnings):
     elif content and mode == 'formdata':
         op['consumes'] = ['multipart/form-data']
         for f in content:
+            if f.get('disabled') or not f.get('key'): continue
             op['parameters'].append({'name': f['key'], 'in': 'formData', 'required': True,
                                      'type': 'file' if f.get('type') == 'file' else 'string',
                                      'x-ms-summary': label(f['key'])})
     elif content:
         warnings.append(f'"{name}": its {mode} request body isn\'t converted; add the parameters by hand')
+
+    reserved = [x for x in op['parameters'] if x['name'] == RESERVED_PARAM]
+    if any(x['in'] == 'path' for x in reserved):
+        warnings.append(f'skipped "{name}": its path uses "{RESERVED_PARAM}", a parameter name Power Platform '
+                        'reserves (ConnectionIdParameterNotAllowed)')
+        return None
+    if reserved:
+        op['parameters'] = [x for x in op['parameters'] if x['name'] != RESERVED_PARAM]
+        warnings.append(f'"{name}": dropped its "{RESERVED_PARAM}" {reserved[0]["in"]} parameter, a name Power '
+                        'Platform reserves (ConnectionIdParameterNotAllowed); the API will not receive it')
 
     # Only the first success response carries a schema: the designer uses just one, and Power Platform's
     # validator flags schemas on 'default' (DefaultResponseHasSchema) or on several responses
@@ -392,9 +418,10 @@ def build_paths(col, env):
             while opid in seen_ids:
                 opid = f'{base}{n}'
                 n += 1
+            op = build_operation(it, req, method, path, url, folder, opid, warnings)
+            if op is None: continue   # skipped; build_operation has said why
             seen_ids.add(opid)
-            paths.setdefault(path, OrderedDict())[method] = build_operation(it, req, method, path, url, folder,
-                                                                            opid, warnings)
+            paths.setdefault(path, OrderedDict())[method] = op
 
     walk(col.get('item', []), None)
     used = {o['tags'][0] for ops in paths.values() for o in ops.values()}
@@ -443,6 +470,22 @@ def write_outputs(out, spec, definition, props):
         json.dump(props, f, indent=2)
 
 
+def check_options(a):
+    """Raise ConfigError for option values Power Platform rejects; return warnings for doubtful ones."""
+    for option, value in (('--website', a.website), ('--privacy-url', a.privacy_url)):
+        u = urlparse(value)
+        if u.scheme not in ('http', 'https') or not u.netloc or re.search(r'\s', value):
+            raise ConfigError(f'{option} must be an absolute URL (Power Platform rule UrlNotValid): {value!r}')
+    notes = []
+    if 'CHANGE_ME' in a.website + a.privacy_url:
+        notes.append('pass --website and --privacy-url for connector metadata')
+    if len(a.title) > MAX_TITLE_CHARS:
+        notes.append(f'--title is {len(a.title)} characters; Microsoft allows at most {MAX_TITLE_CHARS}')
+    if not HEX_COLOR_RE.fullmatch(a.brand_color):
+        notes.append(f'--brand-color {a.brand_color!r} is not a #RRGGBB colour')
+    return notes
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Convert a Postman collection into a Power Platform custom connector.')
     ap.add_argument('collection')
@@ -460,12 +503,12 @@ def main(argv=None):
     ap.add_argument('--brand-color', default='#007EE5')
     a = ap.parse_args(argv)
 
-    col = load_json(a.collection)
-    env = {v['key']: v.get('value', '') for v in col.get('variable', [])}
-    if a.env:
-        env.update({v['key']: v.get('value', '') for v in load_json(a.env).get('values', []) if v.get('enabled', True)})
-
     try:
+        option_warnings = check_options(a)
+        col = load_json(a.collection)
+        env = load_variables(col.get('variable') or [], a.collection)
+        if a.env:
+            env.update(load_variables(load_json(a.env).get('values') or [], a.env))
         secdefs, security, conn_params = build_security(col, env, a.extra_scopes.split())
         paths, tags, host_guess, warnings = build_paths(col, env)
         host = a.host or host_guess
@@ -474,6 +517,10 @@ def main(argv=None):
     except ConfigError as e:
         print(f'ERROR: {e}', file=sys.stderr)
         return 1
+    if 'oauth2_auth' in secdefs and not secdefs['oauth2_auth']['scopes']:
+        warnings.append('no OAuth scopes in the collection, environment or --extra-scopes; '
+                        'the identity provider may refuse to issue a token')
+    warnings += option_warnings
     spec = build_spec(a, paths, tags, host, secdefs, security)
     props = {'properties': {'connectionParameters': conn_params, 'iconBrandColor': a.brand_color,
                             'capabilities': [], 'publisher': a.publisher}}
@@ -496,9 +543,6 @@ def main(argv=None):
     n = sum(len(ops) for ops in paths.values())
     print(f'{n} operations across {len(paths)} paths -> {out}  [{"validation failed" if ok is False else message}]')
     for w in warnings: print(f'WARNING: {w}')
-    if len(a.title) > MAX_TITLE_CHARS:
-        print(f'WARNING: --title is {len(a.title)} characters; Microsoft allows at most {MAX_TITLE_CHARS}')
-    if 'CHANGE_ME' in a.website + a.privacy_url: print('WARNING: pass --website and --privacy-url for connector metadata')
     for e in errors: print(f'ERROR: {e}', file=sys.stderr)
     if errors:
         print(f'ERROR: {a.out} was not changed; the failed output is in {out} for inspection', file=sys.stderr)

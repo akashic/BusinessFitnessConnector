@@ -29,7 +29,10 @@ provenance:
     postman2pp.py build_operation (responses block) and tests/test_postman2pp.py
     EndToEnd.test_collection ("only one response per operation carries a schema"); a GET with form
     data also passed openapi-spec-validator despite BodyOrFormDataParameterInFetchOperationNotAllowed
-    (fixed in build_operation, test RequestHandling.test_form_data_on_a_get_is_dropped_with_a_warning); the definition
+    (fixed in build_operation, test RequestHandling.test_form_data_on_a_get_is_dropped_with_a_warning); a
+    query parameter named connectionId (ConnectionIdParameterNotAllowed) and --website "not a url"
+    (UrlNotValid) also exited 0 at commit 3925eaa (fixed in build_operation and check_options, tests
+    InputChecks.test_reserved_connection_id_parameter and test_invalid_website_url_is_an_error); the definition
     at commit 1c292fa put an Error schema on 'default' and every error code for all 133 operations
   author:
 related: [2026-10-14-1529-review-generator-against-real-collection]
@@ -43,7 +46,7 @@ To model Business Fitness's error body, `postman2pp.py` pointed `default` and ev
 - "DefaultResponseHasSchema": the 'default' response should not have schema definition;
 - "OperationHasManyResponsesWithSchema": only one schema will be used in the designer.
 
-A later review found a third case: a `GET` with form data passed openapi-spec-validator, although Microsoft's "BodyOrFormDataParameterInFetchOperationNotAllowed" rule forbids it. The same page also lists rules the output may still trip and that no local tool checks: "UnrecognizedTypeFormat" (`format: uuid`), "CollectionFormatValueNotSupported" (`multi`) and "PartialDuplicateOperationPath" (`/x/{id}` next to `/x/detailed`).
+A later review found a third case: a `GET` with form data passed openapi-spec-validator, although Microsoft's "BodyOrFormDataParameterInFetchOperationNotAllowed" rule forbids it. A fifth review found two more: a parameter named `connectionId` ("ConnectionIdParameterNotAllowed") and a connector-metadata website that isn't an absolute URL ("UrlNotValid"). The same page also lists rules the output may still trip and that no local tool checks: "UnrecognizedTypeFormat" (`format: uuid`), "CollectionFormatValueNotSupported" (`multi`) and "PartialDuplicateOperationPath" (`/x/{id}` next to `/x/detailed`).
 
 ## Why it happened
 openapi-spec-validator implements the OpenAPI 2.0 specification. Power Platform adds its own rules for its designer and runtime, published only as Microsoft's error list and enforced by `paconn validate` and by import.

@@ -45,7 +45,10 @@
      - Operations with no usable example success response are listed. The collection has no example responses for the 7 Documents API actions, so their output is untyped until you add a response schema by hand.
      - A body on a `GET` or `HEAD` request is dropped and listed, because Power Platform doesn't allow bodies on fetch operations. Bodies on `DELETE` are kept.
      - Bodies other than raw JSON or form data (e.g. `x-www-form-urlencoded`) aren't converted and are listed, so you can add those parameters by hand.
-     - A `--title` over 30 characters is flagged (Microsoft's limit).
+     - A `--title` over 30 characters is flagged (Microsoft's limit), as is a `--brand-color` that isn't `#RRGGBB`.
+     - A parameter named `connectionId` is dropped (or its whole request skipped, if it's in the path), because Power Platform reserves the name (ConnectionIdParameterNotAllowed).
+     - Missing OAuth scopes are flagged. The script no longer invents a `default` scope.
+   - Unreadable or malformed collection and environment files, and a `--website` / `--privacy-url` that isn't an absolute URL (Power Platform rule UrlNotValid), stop the run with an error.
 
 4. Review the YAML before deploying:
    - Check `securityDefinitions`: the script maps Postman OAuth2 → `accessCode` flow, API key → header key, and Bearer → an Authorization header connection parameter. Fill `clientId` in `apiProperties.json`. The connector uses a per-connector redirect URI (`redirectMode: GlobalPerConnector`): after creating the connector, copy the Redirect URL from its Security tab and register that exact URL with Business Fitness. The shared global redirect `https://global.consent.azure-apim.net/redirect` no longer works for new connections.
